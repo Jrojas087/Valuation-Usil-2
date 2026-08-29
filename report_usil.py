@@ -46,18 +46,13 @@ def _fmt_cur_short(x: Optional[float], currency: str) -> str:
     sign = "-" if v < 0 else ""
     av = abs(v)
     if currency == "PYG":
-        if av >= 1_000_000_000:
-            return f"{sign}Gs. {av/1_000_000_000:,.2f} B".replace(",", ".")
-        if av >= 1_000_000:
-            return f"{sign}Gs. {av/1_000_000:,.1f} MM".replace(",", ".")
         return _fmt_cur(v, currency)
-    else:
-        sym = "$" if currency == "USD" else currency
-        if av >= 1_000_000:
-            return f"{sign}{sym} {av/1_000_000:.2f}M"
-        if av >= 1_000:
-            return f"{sign}{sym} {av/1_000:.1f}K"
-        return _fmt_cur(v, currency)
+    sym = "$" if currency == "USD" else currency
+    if av >= 1_000_000:
+        return f"{sign}{sym} {av/1_000_000:.2f}M"
+    if av >= 1_000:
+        return f"{sign}{sym} {av/1_000:.1f}K"
+    return _fmt_cur(v, currency)
 
 def wrap(s: str, width: int) -> list[str]:
     return textwrap.wrap(s, width=width, break_long_words=False, replace_whitespace=False)
@@ -74,6 +69,8 @@ class OnePager:
     currency: str
     project: str
     responsible: str
+    programa: str
+    integrantes: str
     report_date: str
     verdict: str
     rationale: str
@@ -121,9 +118,11 @@ def build_onepager_text(r: OnePager) -> str:
 
     lines = [
         "ONE-PAGER EJECUTIVO — EVALUACIÓN FINANCIERA",
-        f"{r.institution} — {r.program} — {r.course}",
+        f"{r.institution}",
+        f"Programa: {r.programa}  |  {r.course}",
         f"Moneda: {C}  |  Fecha: {r.report_date}",
         f"Proyecto: {r.project}  |  Responsable: {r.responsible}",
+        *([ f"Integrantes: {r.integrantes}" ] if r.integrantes.strip() else []),
         "",
         f"DICTAMEN: {r.verdict} {badge(r.verdict)}",
         r.rationale,
@@ -228,19 +227,23 @@ def generate_onepager_pdf(
     right = W - mg
     cw    = right - left   # ≈ 530 pt
 
-    # ══ BLOQUE 1: HEADER (h=50) ═══════════════════════════════════════════════
-    h1_h = 50
+    # ══ BLOQUE 1: HEADER (h=95) ═══════════════════════════════════════════════
+    h1_h = 95
     rr(left, top - h1_h, cw, h1_h, r=12, fill=card2)
-    tx(left+12, top-16,  f"ONE-PAGER EJECUTIVO — EVALUACIÓN FINANCIERA ({C})", size=10.5, bold=True)
-    tx(left+12, top-28,  f"{onepager.institution} — {onepager.program} — {onepager.course}", size=7.8, col=muted)
-    tx(left+12, top-39,  f"Proyecto: {onepager.project}   |   Responsable: {onepager.responsible}", size=7.8, col=muted)
+    tx(left+12, top-16, f"ONE-PAGER EJECUTIVO — EVALUACIÓN FINANCIERA ({C})", size=10.5, bold=True)
+    tx(left+12, top-28, onepager.institution, size=7.8, col=muted)
+    tx(left+12, top-38, onepager.programa, size=7.8, col=muted)
+    tx(left+12, top-48, f"Proyecto: {onepager.project}   |   Responsable: {onepager.responsible}", size=7.8, col=muted)
+    if onepager.integrantes.strip():
+        tx(left+12, top-58, f"Integrantes: {onepager.integrantes[:90]}", size=7.5, col=muted)
     txr(right-12, top-28, f"Fecha: {onepager.report_date}", size=7.8, col=muted)
 
+    # Pill — positioned below all text lines, no overlap
     pill_col = good if onepager.verdict == "APROBADO" else (bad if onepager.verdict == "RECHAZADO" else warn_c)
     cv.setFillColor(colors.Color(pill_col.red, pill_col.green, pill_col.blue, alpha=0.16))
     cv.setStrokeColor(linec)
-    cv.roundRect(right-130, top-44, 116, 20, 10, stroke=1, fill=1)
-    tx(right-121, top-38, f"DICTAMEN: {onepager.verdict}", size=9, bold=True, col=pill_col)
+    cv.roundRect(right-140, top-90, 126, 22, 11, stroke=1, fill=1)
+    tx(right-131, top-83, f"DICTAMEN: {onepager.verdict}", size=9, bold=True, col=pill_col)
 
     y = top - h1_h - 5   # cursor
 

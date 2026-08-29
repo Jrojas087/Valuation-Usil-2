@@ -114,27 +114,22 @@ def fmt_money(x) -> str:
     return f"{_sym} {v:,.{_dec}f}"
 
 def fmt_money_short(x) -> str:
-    """Formato abreviado para tarjetas KPI (MM = millones, M = millions)."""
+    """Formato para tarjetas KPI. PYG: unidades completas. USD: abreviado."""
     try:
         v = float(x)
         if not np.isfinite(v):
             return "—"
     except Exception:
         return "—"
+    if _IS_PYG:
+        return fmt_money(v)
     sign = "−" if v < 0 else ""
     av = abs(v)
-    if _IS_PYG:
-        if av >= 1_000_000_000:
-            return f"{sign}{_sym} {av/1_000_000_000:,.2f} B".replace(",", ".")
-        if av >= 1_000_000:
-            return f"{sign}{_sym} {av/1_000_000:,.1f} MM".replace(",", ".")
-        return f"{sign}" + fmt_money(v)
-    else:
-        if av >= 1_000_000:
-            return f"{sign}{_sym} {av/1_000_000:.2f}M"
-        if av >= 1_000:
-            return f"{sign}{_sym} {av/1_000:.1f}K"
-        return f"{sign}" + fmt_money(v)
+    if av >= 1_000_000:
+        return f"{sign}{_sym} {av/1_000_000:.2f}M"
+    if av >= 1_000:
+        return f"{sign}{_sym} {av/1_000:.1f}K"
+    return f"{sign}" + fmt_money(v)
 
 def fmt_pct(x) -> str:
     try:
@@ -234,8 +229,11 @@ with st.sidebar.expander("ℹ️ ¿Cómo usar esta aplicación?", expanded=False
 
 st.sidebar.divider()
 st.sidebar.header("🧩 Identificación")
-project     = st.sidebar.text_input("Proyecto",    "Proyecto ABC")
+programa    = st.sidebar.text_input("Programa", "MBA USIL")
+project     = st.sidebar.text_input("Proyecto", "Proyecto ABC")
 responsible = st.sidebar.text_input("Responsable", "Docente: Jorge Rojas")
+integrantes = st.sidebar.text_area("Integrantes", "",
+    help="Nombres de los integrantes del equipo (se imprimirán en el PDF).")
 
 st.sidebar.divider()
 st.sidebar.header("0) Inversión inicial")
@@ -714,6 +712,8 @@ onepager = rep.OnePager(
     currency=CURRENCY,
     project=project,
     responsible=responsible,
+    programa=programa,
+    integrantes=integrantes,
     report_date=date.today().isoformat(),
     verdict=verdict,
     rationale=rationale,
