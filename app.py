@@ -80,6 +80,10 @@ _sym, _dec = _CURR_OPTIONS[_curr_sel]
 CURRENCY   = _curr_sel.split()[0]
 _money_fmt = "%.0f" if _dec == 0 else "%.2f"   # Gs. no usa centavos; USD sí
 
+def _money_hint(x) -> None:
+    """Muestra el valor con separador de miles debajo del input (number_input no lo soporta nativamente)."""
+    st.sidebar.caption(f"= {fmt_money(x)}")
+
 _IS_PYG = (CURRENCY == "PYG")
 _DEF = {
     "capex0":   3_500_000_000.0  if _IS_PYG else 1_000_000.0,
@@ -243,6 +247,7 @@ capex0 = st.sidebar.number_input(
     value=_DEF["capex0"], step=_DEF["step_big"], min_value=1.0, format=_money_fmt,
     help="Monto total invertido para arrancar el proyecto: maquinaria, obra civil, licencias, capital inicial, etc."
 )
+_money_hint(capex0)
 
 st.sidebar.divider()
 st.sidebar.header("1) CAPM / WACC")
@@ -261,8 +266,10 @@ st.sidebar.divider()
 st.sidebar.header("2) Estructura de capital")
 debt = st.sidebar.number_input(f"Deuda (D) [{CURRENCY}]", value=_DEF["debt"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Deuda financiera total del proyecto (préstamos bancarios, bonos, etc.).")
+_money_hint(debt)
 equity_bk = st.sidebar.number_input(f"Capital propio (E) [{CURRENCY}]", value=_DEF["equity"], step=_DEF["step_big"], min_value=1.0, format=_money_fmt,
     help="Aporte de los socios/accionistas. E + D = inversión total financiada.")
+_money_hint(equity_bk)
 kd = st.sidebar.number_input("Kd (%)", value=7.0, step=0.25,
     help="Costo de la deuda: tasa de interés anual del préstamo antes de impuestos. El modelo la ajusta por el beneficio fiscal (× (1−T)).") / 100
 
@@ -270,21 +277,29 @@ st.sidebar.divider()
 st.sidebar.header("3A) Contable Año 1 → FCF₁")
 sales_y1 = st.sidebar.number_input(f"Ventas Año 1 [{CURRENCY}]", value=_DEF["sales"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
     help="Ingresos totales proyectados para el primer año de operación.")
+_money_hint(sales_y1)
 cvar_y1 = st.sidebar.number_input(f"Costos variables [{CURRENCY}]", value=_DEF["cvar"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
     help="Costos que varían con el volumen de ventas: materia prima, comisiones, transporte, etc.")
+_money_hint(cvar_y1)
 cfix_y1 = st.sidebar.number_input(f"Costos fijos [{CURRENCY}]", value=_DEF["cfix"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Costos que no cambian con el volumen: alquileres, sueldos administrativos, seguros, etc.")
+_money_hint(cfix_y1)
 dep_y1 = st.sidebar.number_input(f"Depreciación (no caja) [{CURRENCY}]", value=_DEF["dep"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Depreciación anual de activos fijos. Es un gasto contable que NO implica salida de caja, por eso se suma de vuelta al calcular el FCF.")
+_money_hint(dep_y1)
 capex_y1 = st.sidebar.number_input(f"CAPEX Año 1 (mant.) [{CURRENCY}]", value=_DEF["capex_y1"], step=_DEF["step_sm"], min_value=0.0, format=_money_fmt,
     help="Inversiones de mantenimiento y crecimiento del Año 1 (reposición de equipos, expansiones). SÍ implica salida de caja.")
+_money_hint(capex_y1)
 st.sidebar.markdown("**Δ Capital de trabajo**")
 d_ar  = st.sidebar.number_input(f"Δ AR (cuentas cobrar) [{CURRENCY}]", value=_DEF["d_ar"], step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en cuentas por cobrar: dinero que te deben los clientes. Un aumento reduce el FCF (dinero inmovilizado).")
+_money_hint(d_ar)
 d_inv = st.sidebar.number_input(f"Δ INV (inventarios) [{CURRENCY}]",   value=_DEF["d_inv"], step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en inventarios. Un aumento reduce el FCF (inversión en stock).")
+_money_hint(d_inv)
 d_ap  = st.sidebar.number_input(f"Δ AP (cuentas pagar) [{CURRENCY}]",  value=_DEF["d_ap"],  step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en cuentas por pagar: lo que le debés a proveedores. Un aumento MEJORA el FCF (financiamiento gratuito de corto plazo).")
+_money_hint(d_ap)
 
 st.sidebar.divider()
 st.sidebar.header("3B) Proyección + perpetuidad")
@@ -305,22 +320,20 @@ g_mode_mc   = st.sidebar.number_input("g base (%)",       value=5.0, step=0.25, 
 g_max_mc    = st.sidebar.number_input("g máx (%)",        value=8.0, step=0.25, help="Mejor caso de crecimiento en la simulación.") / 100
 wacc_range  = st.sidebar.number_input("WACC rango ± (%)", value=2.0, step=0.25, help="El WACC varía entre (WACC - rango) y (WACC + rango) en la simulación.") / 100
 capex_min_mc  = st.sidebar.number_input(f"CAPEX mín [{CURRENCY}]", value=max(capex0*0.90, 1.0), step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial en el mejor escenario (menor costo).")
+_money_hint(capex_min_mc)
 capex_mode_mc = st.sidebar.number_input(f"CAPEX base [{CURRENCY}]", value=capex0,              step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial más probable.")
+_money_hint(capex_mode_mc)
 capex_max_mc  = st.sidebar.number_input(f"CAPEX máx [{CURRENCY}]",  value=capex0 * 1.10,       step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial en el peor escenario (mayor costo).")
+_money_hint(capex_max_mc)
 
-st.sidebar.markdown("**Shock FCF₁** (multiplicador aleatorio)")
 st.sidebar.caption(
-    "El FCF del Año 1 que calculaste arriba es un único número fijo. Para simular "
-    "que la realidad puede salir mejor o peor, cada simulación lo multiplica por un "
-    "factor al azar (1.00 = sin cambio). Ese FCF₁ 'sacudido' es la base desde la que "
-    "crecen todos los años siguientes en el Monte Carlo."
+    "El modelo también simula que el primer año de flujo de caja podría salir "
+    "hasta 15% mejor o peor de lo calculado, para no depender de un único número."
 )
-mult_min  = st.sidebar.number_input("Shock FCF₁ mín",  value=0.85, step=0.01,
-    help="Peor caso: multiplicador que reduce el FCF₁ en la simulación (ej. 0.85 = el FCF₁ calculado arriba, pero un 15% menor).")
-mult_mode = st.sidebar.number_input("Shock FCF₁ base", value=1.00, step=0.01,
-    help="Caso más probable: multiplicador que se aplica al FCF₁ con más frecuencia en la simulación (1.00 = el FCF₁ calculado arriba, sin cambios).")
-mult_max  = st.sidebar.number_input("Shock FCF₁ máx",  value=1.15, step=0.01,
-    help="Mejor caso: multiplicador que aumenta el FCF₁ en la simulación (ej. 1.15 = el FCF₁ calculado arriba, pero un 15% mayor).")
+# Rango de variación del FCF₁ en el Monte Carlo. Fijo: no es un parámetro que se
+# enseñe en la materia (a diferencia de WACC, CAPM o crecimiento), así que no se
+# expone como control editable — solo agrega ruido a la simulación.
+mult_min, mult_mode, mult_max = 0.85, 1.00, 1.15
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Cálculos determinísticos
