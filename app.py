@@ -78,6 +78,7 @@ _CURR_OPTIONS = {
 _curr_sel  = st.sidebar.selectbox("💱 Moneda del proyecto", list(_CURR_OPTIONS.keys()), index=0)
 _sym, _dec = _CURR_OPTIONS[_curr_sel]
 CURRENCY   = _curr_sel.split()[0]
+_money_fmt = "%.0f" if _dec == 0 else "%.2f"   # Gs. no usa centavos; USD sí
 
 _IS_PYG = (CURRENCY == "PYG")
 _DEF = {
@@ -239,7 +240,7 @@ st.sidebar.divider()
 st.sidebar.header("0) Inversión inicial")
 capex0 = st.sidebar.number_input(
     f"CAPEX Año 0 ({CURRENCY})",
-    value=_DEF["capex0"], step=_DEF["step_big"], min_value=1.0,
+    value=_DEF["capex0"], step=_DEF["step_big"], min_value=1.0, format=_money_fmt,
     help="Monto total invertido para arrancar el proyecto: maquinaria, obra civil, licencias, capital inicial, etc."
 )
 
@@ -258,31 +259,31 @@ tax_rate = st.sidebar.number_input("Impuesto T (%)", value=10.0, step=0.5,
 
 st.sidebar.divider()
 st.sidebar.header("2) Estructura de capital")
-debt = st.sidebar.number_input(f"Deuda (D) [{CURRENCY}]", value=_DEF["debt"], step=_DEF["step_big"], min_value=0.0,
+debt = st.sidebar.number_input(f"Deuda (D) [{CURRENCY}]", value=_DEF["debt"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Deuda financiera total del proyecto (préstamos bancarios, bonos, etc.).")
-equity_bk = st.sidebar.number_input(f"Capital propio (E) [{CURRENCY}]", value=_DEF["equity"], step=_DEF["step_big"], min_value=1.0,
+equity_bk = st.sidebar.number_input(f"Capital propio (E) [{CURRENCY}]", value=_DEF["equity"], step=_DEF["step_big"], min_value=1.0, format=_money_fmt,
     help="Aporte de los socios/accionistas. E + D = inversión total financiada.")
 kd = st.sidebar.number_input("Kd (%)", value=7.0, step=0.25,
     help="Costo de la deuda: tasa de interés anual del préstamo antes de impuestos. El modelo la ajusta por el beneficio fiscal (× (1−T)).") / 100
 
 st.sidebar.divider()
 st.sidebar.header("3A) Contable Año 1 → FCF₁")
-sales_y1 = st.sidebar.number_input(f"Ventas Año 1 [{CURRENCY}]", value=_DEF["sales"], step=_DEF["step_med"], min_value=0.0,
+sales_y1 = st.sidebar.number_input(f"Ventas Año 1 [{CURRENCY}]", value=_DEF["sales"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
     help="Ingresos totales proyectados para el primer año de operación.")
-cvar_y1 = st.sidebar.number_input(f"Costos variables [{CURRENCY}]", value=_DEF["cvar"], step=_DEF["step_med"], min_value=0.0,
+cvar_y1 = st.sidebar.number_input(f"Costos variables [{CURRENCY}]", value=_DEF["cvar"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
     help="Costos que varían con el volumen de ventas: materia prima, comisiones, transporte, etc.")
-cfix_y1 = st.sidebar.number_input(f"Costos fijos [{CURRENCY}]", value=_DEF["cfix"], step=_DEF["step_big"], min_value=0.0,
+cfix_y1 = st.sidebar.number_input(f"Costos fijos [{CURRENCY}]", value=_DEF["cfix"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Costos que no cambian con el volumen: alquileres, sueldos administrativos, seguros, etc.")
-dep_y1 = st.sidebar.number_input(f"Depreciación (no caja) [{CURRENCY}]", value=_DEF["dep"], step=_DEF["step_big"], min_value=0.0,
+dep_y1 = st.sidebar.number_input(f"Depreciación (no caja) [{CURRENCY}]", value=_DEF["dep"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
     help="Depreciación anual de activos fijos. Es un gasto contable que NO implica salida de caja, por eso se suma de vuelta al calcular el FCF.")
-capex_y1 = st.sidebar.number_input(f"CAPEX Año 1 (mant.) [{CURRENCY}]", value=_DEF["capex_y1"], step=_DEF["step_sm"], min_value=0.0,
+capex_y1 = st.sidebar.number_input(f"CAPEX Año 1 (mant.) [{CURRENCY}]", value=_DEF["capex_y1"], step=_DEF["step_sm"], min_value=0.0, format=_money_fmt,
     help="Inversiones de mantenimiento y crecimiento del Año 1 (reposición de equipos, expansiones). SÍ implica salida de caja.")
 st.sidebar.markdown("**Δ Capital de trabajo**")
-d_ar  = st.sidebar.number_input(f"Δ AR (cuentas cobrar) [{CURRENCY}]", value=_DEF["d_ar"], step=_DEF["step_wc"],
+d_ar  = st.sidebar.number_input(f"Δ AR (cuentas cobrar) [{CURRENCY}]", value=_DEF["d_ar"], step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en cuentas por cobrar: dinero que te deben los clientes. Un aumento reduce el FCF (dinero inmovilizado).")
-d_inv = st.sidebar.number_input(f"Δ INV (inventarios) [{CURRENCY}]",   value=_DEF["d_inv"], step=_DEF["step_wc"],
+d_inv = st.sidebar.number_input(f"Δ INV (inventarios) [{CURRENCY}]",   value=_DEF["d_inv"], step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en inventarios. Un aumento reduce el FCF (inversión en stock).")
-d_ap  = st.sidebar.number_input(f"Δ AP (cuentas pagar) [{CURRENCY}]",  value=_DEF["d_ap"],  step=_DEF["step_wc"],
+d_ap  = st.sidebar.number_input(f"Δ AP (cuentas pagar) [{CURRENCY}]",  value=_DEF["d_ap"],  step=_DEF["step_wc"], format=_money_fmt,
     help="Aumento en cuentas por pagar: lo que le debés a proveedores. Un aumento MEJORA el FCF (financiamiento gratuito de corto plazo).")
 
 st.sidebar.divider()
@@ -303,12 +304,23 @@ g_min_mc    = st.sidebar.number_input("g mín (%)",        value=2.0, step=0.25,
 g_mode_mc   = st.sidebar.number_input("g base (%)",       value=5.0, step=0.25, help="Caso más probable de crecimiento.") / 100
 g_max_mc    = st.sidebar.number_input("g máx (%)",        value=8.0, step=0.25, help="Mejor caso de crecimiento en la simulación.") / 100
 wacc_range  = st.sidebar.number_input("WACC rango ± (%)", value=2.0, step=0.25, help="El WACC varía entre (WACC - rango) y (WACC + rango) en la simulación.") / 100
-capex_min_mc  = st.sidebar.number_input(f"CAPEX mín [{CURRENCY}]", value=max(capex0*0.90, 1.0), step=_DEF["step_big"], help="Inversión inicial en el mejor escenario (menor costo).")
-capex_mode_mc = st.sidebar.number_input(f"CAPEX base [{CURRENCY}]", value=capex0,              step=_DEF["step_big"], help="Inversión inicial más probable.")
-capex_max_mc  = st.sidebar.number_input(f"CAPEX máx [{CURRENCY}]",  value=capex0 * 1.10,       step=_DEF["step_big"], help="Inversión inicial en el peor escenario (mayor costo).")
-mult_min  = st.sidebar.number_input("Shock FCF₁ mín",  value=0.85, step=0.01, help="En el peor caso, el FCF del Año 1 será este porcentaje del valor calculado (ej. 0.85 = 15% menor).")
-mult_mode = st.sidebar.number_input("Shock FCF₁ base", value=1.00, step=0.01, help="Factor de ajuste central (1.00 = sin cambio).")
-mult_max  = st.sidebar.number_input("Shock FCF₁ máx",  value=1.15, step=0.01, help="En el mejor caso, el FCF del Año 1 será este porcentaje del valor calculado (ej. 1.15 = 15% mayor).")
+capex_min_mc  = st.sidebar.number_input(f"CAPEX mín [{CURRENCY}]", value=max(capex0*0.90, 1.0), step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial en el mejor escenario (menor costo).")
+capex_mode_mc = st.sidebar.number_input(f"CAPEX base [{CURRENCY}]", value=capex0,              step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial más probable.")
+capex_max_mc  = st.sidebar.number_input(f"CAPEX máx [{CURRENCY}]",  value=capex0 * 1.10,       step=_DEF["step_big"], format=_money_fmt, help="Inversión inicial en el peor escenario (mayor costo).")
+
+st.sidebar.markdown("**Shock FCF₁** (multiplicador aleatorio)")
+st.sidebar.caption(
+    "El FCF del Año 1 que calculaste arriba es un único número fijo. Para simular "
+    "que la realidad puede salir mejor o peor, cada simulación lo multiplica por un "
+    "factor al azar (1.00 = sin cambio). Ese FCF₁ 'sacudido' es la base desde la que "
+    "crecen todos los años siguientes en el Monte Carlo."
+)
+mult_min  = st.sidebar.number_input("Shock FCF₁ mín",  value=0.85, step=0.01,
+    help="Peor caso: multiplicador que reduce el FCF₁ en la simulación (ej. 0.85 = el FCF₁ calculado arriba, pero un 15% menor).")
+mult_mode = st.sidebar.number_input("Shock FCF₁ base", value=1.00, step=0.01,
+    help="Caso más probable: multiplicador que se aplica al FCF₁ con más frecuencia en la simulación (1.00 = el FCF₁ calculado arriba, sin cambios).")
+mult_max  = st.sidebar.number_input("Shock FCF₁ máx",  value=1.15, step=0.01,
+    help="Mejor caso: multiplicador que aumenta el FCF₁ en la simulación (ej. 1.15 = el FCF₁ calculado arriba, pero un 15% mayor).")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Cálculos determinísticos
