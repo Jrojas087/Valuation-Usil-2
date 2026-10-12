@@ -1,5 +1,5 @@
-# report_usil.py — v2.0
-# Exporter TXT + PDF (ReportLab) — sin matplotlib
+# report_usil.py — v3.0
+# One-pager ejecutivo (TXT + PDF ReportLab) construido desde una `valuation_engine.Evaluation`.
 
 from __future__ import annotations
 
@@ -7,28 +7,38 @@ import io
 import math
 import textwrap
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Optional
+
+import valuation_engine as ve
 
 REPORTLAB_OK = True
 try:
+    from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch
-    from reportlab.lib import colors
-    from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+    from reportlab.pdfgen import canvas
 except Exception:
     REPORTLAB_OK = False
 
-# ─── Formateadores ────────────────────────────────────────────────────────────
-def fmt_pct(x: Optional[float]) -> str:
-    if x is None or not math.isfinite(x):
-        return "—"
-    return f"{x*100:.2f}%"
+MODE_LABEL = {"none": "sin valor terminal", "salvage": "con valor de desecho", "perpetuity": "con perpetuidad"}
 
-def fmt_pyg(x: Optional[float]) -> str:
+# Divulgación de supuestos y limitaciones (distinguir hecho de opinión, no garantizar resultados).
+DISCLOSURE = [
+    "Los resultados son estimaciones que dependen de los supuestos cargados; no son una recomendación de inversión ni una garantía.",
+    "Hechos: los indicadores (VAN, TIR, WACC) son cálculos. Opiniones: la lectura y las alertas son juicios del modelo según umbrales fijos.",
+    "Flujos al proyecto (FCFF) descontados al WACC con estructura de capital objetivo; costos hundidos y financieros excluidos del flujo.",
+    "No valora opciones reales (expansión, abandono); el IRE no arrastra pérdidas; el riesgo país entra como prima en el Ke.",
+    "El Monte Carlo refleja solo las distribuciones y correlaciones elegidas por el usuario.",
+]
+
+
+# ─── Formateadores ────────────────────────────────────────────────────────────
+def fmt_pct(x: Optional[float], nd: int = 2) -> str:
     if x is None or not math.isfinite(x):
         return "—"
-    return "Gs. {:,.0f}".format(float(x)).replace(",", ".")
+    return f"{x * 100:.{nd}f}%"
+
 
 def _fmt_cur(x: Optional[float], currency: str) -> str:
     if x is None or not math.isfinite(x):
@@ -40,30 +50,43 @@ def _fmt_cur(x: Optional[float], currency: str) -> str:
         return f"$ {v:,.2f}"
     return f"{currency} {v:,.2f}"
 
+
 def _fmt_cur_short(x: Optional[float], currency: str) -> str:
     if x is None or not math.isfinite(x):
         return "—"
     v = float(x)
-    sign = "-" if v < 0 else ""
-    av = abs(v)
     if currency == "PYG":
         return _fmt_cur(v, currency)
+    sign = "-" if v < 0 else ""
+    av = abs(v)
     sym = "$" if currency == "USD" else currency
     if av >= 1_000_000:
-        return f"{sign}{sym} {av/1_000_000:.2f}M"
+        return f"{sign}{sym} {av / 1_000_000:.2f}M"
     if av >= 1_000:
-        return f"{sign}{sym} {av/1_000:.1f}K"
+        return f"{sign}{sym} {av / 1_000:.1f}K"
     return _fmt_cur(v, currency)
+
 
 def wrap(s: str, width: int) -> list[str]:
     return textwrap.wrap(s, width=width, break_long_words=False, replace_whitespace=False)
 
-def badge(verdict: str) -> str:
-    return {"APROBADO": "✅", "OBSERVADO": "⚠️", "RECHAZADO": "⛔"}.get(verdict, "—")
 
-# ─── Ajuste de texto a un ancho máximo (evita overflow fuera de recuadros) ─────
+def describe_break(be: Optional[ve.BreakEven], cur: str) -> str:
+    """Variable crítica con su valor límite (valor que hace VAN = 0)."""
+    if be is None:
+        return "No se encontró un valor límite dentro del rango explorado."
+    if be.limit_value is None or be.rel_change is None:
+        return f"{be.label}: sin valor límite en el rango explorado."
+    chg = f"{be.rel_change * 100:+.1f}%"
+    if be.unit == "money":
+        return f"{be.label}: VAN = 0 con {_fmt_cur(be.limit_value, cur)} ({chg} vs. base {_fmt_cur(be.base_value, cur)})."
+    if be.unit == "pct":
+        return f"{be.label}: VAN = 0 con {fmt_pct(be.limit_value, 2)} ({chg} vs. base {fmt_pct(be.base_value, 2)})."
+    return f"{be.label}: VAN = 0 con {be.limit_value * 100:.1f}% del nivel base ({chg})."
+
+
+# ─── Ajuste de texto a un ancho máximo ─────────────────────────────────────────
 def _fit_font(s: str, max_w: float, base: float, min_size: float = 6.0, bold: bool = False) -> float:
-    """Tamaño de fuente (entre min_size y base) que hace caber `s` en max_w puntos."""
     if not s:
         return base
     font = "Helvetica-Bold" if bold else "Helvetica"
@@ -72,8 +95,8 @@ def _fit_font(s: str, max_w: float, base: float, min_size: float = 6.0, bold: bo
         size -= 0.3
     return round(max(size, min_size), 1)
 
+
 def _truncate_ellipsis(s: str, max_w: float, size: float, bold: bool = False) -> str:
-    """Recorta `s` con '…' si ni siquiera al tamaño mínimo cabe en max_w."""
     font = "Helvetica-Bold" if bold else "Helvetica"
     if _pdfmetrics.stringWidth(s, font, size) <= max_w:
         return s
@@ -87,551 +110,363 @@ def _truncate_ellipsis(s: str, max_w: float, size: float, bold: bool = False) ->
             hi = mid - 1
     return (s[:lo].rstrip() + ell) if lo > 0 else ell
 
-# ─── Data model ───────────────────────────────────────────────────────────────
+
+# ─── Modelo ───────────────────────────────────────────────────────────────────
 @dataclass
 class OnePager:
+    ev: ve.Evaluation
+    currency: str
     institution: str
     program: str
     course: str
-    currency: str
     project: str
     responsible: str
     programa: str
     integrantes: str
     report_date: str
-    verdict: str
-    rationale: str
-    npv_base: Optional[float]
-    irr_base: Optional[float]
-    payback_simple: Optional[float]
-    payback_discounted: Optional[float]
-    n_years: int
-    g_exp: float
-    g_inf: float
-    wacc: float
-    ke: float
-    kd: float
-    capex0: float
-    fcf1: float
-    ebit: float
-    nopat: float
-    delta_wc: float
-    capex_y1: float
-    pv_fcf: Optional[float]
-    pv_tv: Optional[float]
-    tv: Optional[float]
-    sims: int
-    valid_rate: Optional[float]
-    prob_neg: Optional[float]
-    p5: Optional[float]
-    p50: Optional[float]
-    p95: Optional[float]
-    mean: Optional[float]
-    std: Optional[float]
-    cvar5: Optional[float]
-    checks: Sequence[Tuple[str, bool]]
-    fcf_years: Sequence[float]
+    compat_banner: str = ""        # texto si se exporta en modo compatibilidad
 
-# ─── TXT export ───────────────────────────────────────────────────────────────
+
+def _alerts_sorted(ev: ve.Evaluation):
+    order = {"alta": 0, "media": 1, "info": 2}
+    return sorted(ev.alerts, key=lambda a: (order.get(a.severity, 3), a.code))
+
+
+# ─── TXT ──────────────────────────────────────────────────────────────────────
 def build_onepager_text(r: OnePager) -> str:
-    C = r.currency
+    ev, C = r.ev, r.currency
+    m, wb, p = ev.metrics, ev.wacc, ev.project
 
-    def fc(x):  return _fmt_cur(x, C)
-    def fp(x):  return fmt_pct(x)
+    def fc(x): return _fmt_cur(x, C)
 
-    pb  = "N/A" if r.payback_simple is None else f"{r.payback_simple:.2f} años"
-    pbd = "N/A" if r.payback_discounted is None else f"{r.payback_discounted:.2f} años"
-    prob = "—"  if r.prob_neg is None else f"{r.prob_neg*100:.1f}%"
-
-    lines = [
+    L = [
         "ONE-PAGER EJECUTIVO — EVALUACIÓN FINANCIERA",
-        f"{r.institution}",
+        r.institution,
         f"Programa: {r.programa}  |  {r.course}",
-        f"Moneda: {C}  |  Fecha: {r.report_date}",
+        f"Moneda del flujo: {C}  |  Fecha: {r.report_date}",
         f"Proyecto: {r.project}  |  Responsable: {r.responsible}",
-        *([ f"Integrantes: {r.integrantes}" ] if r.integrantes.strip() else []),
+        *([f"Integrantes: {r.integrantes}"] if r.integrantes.strip() else []),
         "",
-        f"DICTAMEN: {r.verdict} {badge(r.verdict)}",
-        r.rationale,
-        "",
-        "KPIs (determinístico)",
-        f"- VAN (base): {fc(r.npv_base)}",
-        f"- TIR (base): {fp(r.irr_base)}",
-        f"- Payback: {pb}  |  Payback descontado: {pbd}",
-        "",
-        "Supuestos clave",
-        f"- Horizonte: {r.n_years} años + perpetuidad",
-        f"- g explícito: {fp(r.g_exp)}  |  g∞: {fp(r.g_inf)}",
-        f"- WACC: {fp(r.wacc)}  (Ke {fp(r.ke)} | Kd {fp(r.kd)})",
-        f"- CAPEX inicial: {fc(r.capex0)}  |  FCF Año 1: {fc(r.fcf1)}",
-        "",
-        "Flujos proyectados (FCF) — ciclo 1..N",
     ]
-    for i, f in enumerate(r.fcf_years, 1):
-        lines.append(f"- Año {i}: {fc(f)}")
-    lines += [
-        f"- TV (año {r.n_years}): {fc(r.tv)}",
+    if r.compat_banner:
+        L += [f"*** {r.compat_banner} ***", ""]
+    L += [
+        ev.reading.headline,
+        ev.reading.detail,
+        "Variable crítica: " + describe_break(ev.critical, C),
         "",
-        "Puente contable → FCF Año 1",
-        f"- EBIT: {fc(r.ebit)}  |  NOPAT: {fc(r.nopat)}",
-        f"- Depreciación: {fc(r.capex_y1)}  |  ΔCT (AR+INV-AP): {fc(r.delta_wc)}",
+        f"INDICADORES PRINCIPALES  (decisión: {MODE_LABEL.get(m.mode, m.mode)})",
+        f"- VAN (indicador de decisión): {fc(m.van_main)}",
+        f"- VAN sin VT: {fc(m.van_sin_vt)}",
+        f"- VAN con VT{' (REFERENCIAL: el VT está desactivado en la decisión)' if m.con_vt_is_reference else ''}: {fc(m.van_con_vt)}",
+        f"- Peso del VT en el valor: {fmt_pct(m.vt_weight, 1)}",
+        f"- TIR sin VT (principal): {fmt_pct(m.irr_sin_vt)}  |  TIR con VT (secundaria): {fmt_pct(m.irr_con_vt)}",
+        f"- TIR modificada (sin VT): {fmt_pct(m.mirr_sin_vt)}  |  Índice de rentabilidad (sin VT): {m.ir_sin_vt:.2f}",
+        f"- Payback simple: {ve.fmt_years(m.payback)} años  |  descontado: {ve.fmt_years(m.payback_disc)} años  (indicadores secundarios)",
+        f"- Valor anual equivalente (EAA): {fc(m.eaa)}",
         "",
-        "Riesgo (Monte Carlo)",
-        f"- Simulaciones: {r.sims:,}  |  válidas: {'—' if r.valid_rate is None else f'{r.valid_rate*100:.1f}%'}",
-        f"- P(VAN<0): {prob}",
-        f"- P5/P50/P95: {fc(r.p5)} / {fc(r.p50)} / {fc(r.p95)}",
-        f"- Media: {fc(r.mean)}  |  σ: {fc(r.std)}  |  CVaR5: {fc(r.cvar5)}",
+        f"TASA DE DESCUENTO EN {wb.rate_currency.upper()}",
+        f"- Rf (USD) {fmt_pct(wb.rf, 4)} | β desapalancada {wb.beta_u:.3f} → apalancada {wb.beta_l:.3f} | ERP {fmt_pct(wb.erp, 4)} | CRP {fmt_pct(wb.crp, 4)} | prima tamaño {fmt_pct(wb.size_premium, 4)}"
+        if wb.rf == wb.rf else "- (Tasa reconstruida desde valores reportados; sin desglose CAPM)",
+        f"- Ke en USD {fmt_pct(wb.ke_usd, 4)} | π {C} {fmt_pct(wb.infl_flow, 2)} | π USD {fmt_pct(wb.infl_usd, 2)} → Ke en {wb.flow_currency} {fmt_pct(wb.ke_flow, 4)}",
+        f"- Kd antes de IRE {fmt_pct(wb.kd_pre, 4)} | después de IRE ({fmt_pct(wb.tax, 1)}) {fmt_pct(wb.kd_post, 4)}",
+        f"- Pesos: E/V {fmt_pct(wb.wE, 2)} | D/V {fmt_pct(wb.wD, 2)}",
+        f"- WACC: {fmt_pct(wb.wacc, 4)}",
         "",
-        "Checklist Comité",
+        "SUPUESTOS CLAVE",
+        f"- Horizonte {p.n_years} años | g ventas {fmt_pct(p.g_revenue)} | g∞ {fmt_pct(p.g_inf)} | IRE {fmt_pct(p.tax, 1)}",
+        f"- CAPEX inicial {fc(p.capex0)} | valor terminal: {MODE_LABEL.get(p.effective_mode(), p.terminal_mode)}"
+        + (f" | justificación: {p.vt_justification}" if p.effective_mode() == "perpetuity" and p.vt_justification else ""),
+        "",
+        "FLUJO DE CAJA LIBRE (FCF) POR AÑO",
     ]
-    for label, ok in r.checks:
-        lines.append(("✅ " if ok else "❌ ") + label)
-    lines += ["", "Uso académico (MBA). No sustituye due diligence."]
-    return "\n".join(lines)
+    for i, f in enumerate(ev.flows.fcf_ops[0], 1):
+        L.append(f"- Año {i}: {fc(f)}")
+    L += [f"- VT (año {p.n_years}): {fc(m.vt) if p.effective_mode() == 'perpetuity' or m.con_vt_is_reference else '—'}", ""]
+    L.append("ESCENARIO PESIMISTA DETERMINÍSTICO (extremos adversos de todos los drivers a la vez)")
+    if ev.pess_mult:
+        pm = ev.pess_mult
+        L.append("- Precio ×{price:.2f} | volumen ×{volume:.2f} | costo variable ×{unit_vc:.2f} | costos fijos ×{fixed:.2f} | CAPEX ×{capex:.2f} | WACC +{wacc_pp:.2f} pp".format(
+            wacc_pp=pm["wacc"] * 100, **{k: v for k, v in pm.items() if k != "wacc"}))
+        L.append(f"- VAN pesimista: {fc(ev.pess_van_main)}  (sin VT: {fc(ev.pess_van_sin_vt)})")
+    L.append("")
+    if ev.mc is not None:
+        s = ev.mc.stats
+        L += ["RIESGO — MONTE CARLO (sobre drivers operativos)",
+              f"- Simulaciones: {s['n']:,} | distribución: {ev.mc.spec.dist} | P(VAN<0): {fmt_pct(s['prob_neg'], 1)}",
+              f"- P5 / P50 / P95: {fc(s['p5'])} / {fc(s['p50'])} / {fc(s['p95'])}",
+              f"- Media {fc(s['mean'])} | σ {fc(s['std'])} | CVaR5 {fc(s['cvar5'])}",
+              f"- El caso base está en el percentil {fmt_pct(s['base_percentile'], 1)} de la distribución", ""]
+    L.append("ALERTAS ACTIVAS")
+    if ev.alerts:
+        for a in _alerts_sorted(ev):
+            L.append(f"- [{a.severity.upper()}] {a.code} · {a.title}: {a.detail}")
+    else:
+        L.append("- Sin alertas activas.")
+    L += ["", "SUPUESTOS Y LIMITACIONES", *[f"- {d}" for d in DISCLOSURE]]
+    return "\n".join(L)
 
-# ─── PDF premium (ReportLab) — rediseño corporativo full-page ─────────────────
-def generate_onepager_pdf(
-    onepager: OnePager,
-    hist_counts=None,
-    hist_edges=None,
-) -> bytes:
+
+# ─── PDF ──────────────────────────────────────────────────────────────────────
+def generate_onepager_pdf(r: OnePager, hist_counts=None, hist_edges=None) -> bytes:
     if not REPORTLAB_OK:
         raise RuntimeError("ReportLab no disponible.")
+    ev, C = r.ev, r.currency
+    m, wb, p = ev.metrics, ev.wacc, ev.project
 
-    C = onepager.currency
-
-    def fc(x):  return _fmt_cur(x, C)
+    def fc(x): return _fmt_cur(x, C)
     def fcs(x): return _fmt_cur_short(x, C)
-    def fp(x):  return fmt_pct(x)
 
     buf = io.BytesIO()
-    cv  = canvas.Canvas(buf, pagesize=letter)
-    W, H = letter   # 612 × 792 pt
+    cv = canvas.Canvas(buf, pagesize=letter)
+    W, H = letter
 
-    # ── Paleta ───────────────────────────────────────────────────────────────
-    bg     = colors.HexColor("#050914")
-    card   = colors.HexColor("#0b1733")
-    card2  = colors.HexColor("#0d1b3d")
-    linec  = colors.Color(1, 1, 1, alpha=0.09)
-    text   = colors.HexColor("#EAF1FF")
-    muted  = colors.Color(234/255, 241/255, 1, alpha=0.65)
-    accent = colors.HexColor("#66A9FF")
-    good   = colors.HexColor("#27D17C")
-    warn_c = colors.HexColor("#FFCC66")
-    bad    = colors.HexColor("#FF5D5D")
+    bg = colors.HexColor("#050914"); card = colors.HexColor("#0b1733"); card2 = colors.HexColor("#0d1b3d")
+    linec = colors.Color(1, 1, 1, alpha=0.09); text = colors.HexColor("#EAF1FF")
+    muted = colors.Color(234 / 255, 241 / 255, 1, alpha=0.65); accent = colors.HexColor("#66A9FF")
+    good = colors.HexColor("#27D17C"); warn_c = colors.HexColor("#FFCC66"); bad = colors.HexColor("#FF5D5D")
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-    def rr(x, y, w, h, r=8, fill=card):
-        cv.setFillColor(fill)
-        cv.setStrokeColor(linec)
-        cv.setLineWidth(0.6)
-        cv.roundRect(x, y, w, h, r, stroke=1, fill=1)
+    def rr(x, y, w, h, rad=8, fill=card):
+        cv.setFillColor(fill); cv.setStrokeColor(linec); cv.setLineWidth(0.6)
+        cv.roundRect(x, y, w, h, rad, stroke=1, fill=1)
 
     def tx(x, y, s, size=8.5, bold=False, col=text):
-        cv.setFillColor(col)
-        cv.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        cv.drawString(x, y, str(s))
+        cv.setFillColor(col); cv.setFont("Helvetica-Bold" if bold else "Helvetica", size); cv.drawString(x, y, str(s))
 
     def txr(x, y, s, size=8.5, bold=False, col=text):
-        cv.setFillColor(col)
-        cv.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        cv.drawRightString(x, y, str(s))
+        cv.setFillColor(col); cv.setFont("Helvetica-Bold" if bold else "Helvetica", size); cv.drawRightString(x, y, str(s))
 
     def txc(x, y, s, size=8.5, bold=False, col=text):
-        cv.setFillColor(col)
-        cv.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        cv.drawCentredString(x, y, str(s))
+        cv.setFillColor(col); cv.setFont("Helvetica-Bold" if bold else "Helvetica", size); cv.drawCentredString(x, y, str(s))
 
     def hdiv(x1, y, x2):
-        cv.setStrokeColor(linec)
-        cv.setLineWidth(0.4)
-        cv.setDash()
-        cv.line(x1, y, x2, y)
+        cv.setStrokeColor(linec); cv.setLineWidth(0.4); cv.setDash(); cv.line(x1, y, x2, y)
 
-    def sec(x, y, label, size=8):
-        cv.setFillColor(accent)
-        cv.rect(x, y - 1, 3, size + 3, stroke=0, fill=1)
+    def sec(x, y, label, size=7.6):
+        cv.setFillColor(accent); cv.rect(x, y - 1, 3, size + 2, stroke=0, fill=1)
         tx(x + 6, y, label, size=size, bold=True, col=accent)
 
-    def para(x, y, s, w=80, size=7.8, leading=10.5, col=muted, min_y=None, max_lines=None):
-        """Párrafo envuelto; se corta con '…' si excede max_lines o el límite min_y."""
+    def tx_fit(x, y, s, max_w, size=8.5, min_size=5.6, bold=False, col=text):
+        f = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
+        tx(x, y, _truncate_ellipsis(s, max_w, f, bold=bold), size=f, bold=bold, col=col)
+
+    def txr_fit(x, y, s, max_w, size=8.5, min_size=5.6, bold=False, col=text):
+        f = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
+        txr(x, y, _truncate_ellipsis(s, max_w, f, bold=bold), size=f, bold=bold, col=col)
+
+    def txc_fit(x, y, s, max_w, size=8.5, min_size=6.0, bold=False, col=text):
+        f = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
+        txc(x, y, _truncate_ellipsis(s, max_w, f, bold=bold), size=f, bold=bold, col=col)
+
+    def kv(xl, xr, y, label, value, size=7.0, col=text, bold=False):
+        tx(xl, y, label, size=size, col=muted)
+        txr_fit(xr, y, value, (xr - xl) * 0.62, size=size, bold=bold, col=col)
+
+    def para(x, y, s, w, size=7.0, leading=9.2, col=muted, max_lines=None, min_y=None):
         lines = wrap(s, w)
         if max_lines is not None and len(lines) > max_lines:
-            lines = lines[:max_lines]
-            lines[-1] = lines[-1].rstrip() + " …"
-        yy = y
+            lines = lines[:max_lines]; lines[-1] = lines[-1].rstrip() + " …"
         for ln in lines:
-            if min_y is not None and yy < min_y:
+            if min_y is not None and y < min_y:
                 break
-            tx(x, yy, ln, size=size, col=col)
-            yy -= leading
-        return yy
+            tx(x, y, ln, size=size, col=col); y -= leading
+        return y
 
-    def tx_fit(x, y, s, max_w, size=8.5, min_size=6.0, bold=False, col=text):
-        """Dibuja alineado a la izquierda, reduciendo tamaño (y truncando si hace falta) para caber en max_w."""
-        fsz = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
-        s2 = _truncate_ellipsis(s, max_w, fsz, bold=bold)
-        tx(x, y, s2, size=fsz, bold=bold, col=col)
-        return fsz
+    cv.setFillColor(bg); cv.rect(0, 0, W, H, stroke=0, fill=1)
+    mg = int(0.375 * inch); top = H - mg; left = mg; right = W - mg; cw = right - left; GAP = 6
 
-    def txr_fit(x, y, s, max_w, size=8.5, min_size=6.0, bold=False, col=text):
-        """Dibuja alineado a la derecha, reduciendo tamaño (y truncando si hace falta) para caber en max_w."""
-        fsz = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
-        s2 = _truncate_ellipsis(s, max_w, fsz, bold=bold)
-        txr(x, y, s2, size=fsz, bold=bold, col=col)
-        return fsz
+    status_col = {"favorable": good, "mixto": warn_c, "desfavorable": bad}.get(ev.reading.status, accent)
 
-    def txc_fit(x, y, s, max_w, size=8.5, min_size=6.5, bold=False, col=text):
-        """Dibuja centrado, reduciendo tamaño (y truncando si hace falta) para caber en max_w."""
-        fsz = _fit_font(s, max_w, size, min_size=min_size, bold=bold)
-        s2 = _truncate_ellipsis(s, max_w, fsz, bold=bold)
-        txc(x, y, s2, size=fsz, bold=bold, col=col)
-        return fsz
+    # ═ 1. HEADER ═
+    h1 = 78
+    rr(left, top - h1, cw, h1, 10, card2)
+    cv.setFillColor(accent); cv.roundRect(left, top - h1, 5, h1, 3, stroke=0, fill=1)
+    il, ir_ = left + 14, right - 14
+    tx(il, top - 15, f"ONE-PAGER EJECUTIVO — EVALUACIÓN FINANCIERA  ({C})", size=10.5, bold=True)
+    txr(ir_, top - 15, f"Fecha: {r.report_date}", size=7.4, col=muted)
+    hdiv(il, top - 21, ir_)
+    y0 = top - 33
+    tx_fit(il, y0, r.institution, ir_ - il, size=7.4, col=muted); y0 -= 11
+    tx_fit(il, y0, r.programa, ir_ - il, size=8.6, bold=True, col=accent); y0 -= 11
+    tx_fit(il, y0, f"Proyecto: {r.project}   ·   Responsable: {r.responsible}", ir_ - il, size=7.4); y0 -= 10.5
+    if r.integrantes.strip():
+        integs = " · ".join(x.strip() for x in r.integrantes.strip().replace("\n", ",").split(",") if x.strip())
+        tx_fit(il, y0, f"Integrantes: {integs}", ir_ - il, size=7.0, col=muted)
+    y = top - h1 - GAP
 
-    def kv_row(x_left, x_right, y, label, value, size=7.5, col=text, bold=False, label_col=muted):
-        """Fila etiqueta (izq.) / valor (der.) con auto-ajuste del valor al ancho disponible."""
-        tx(x_left, y, label, size=size, col=label_col)
-        max_w = (x_right - x_left) * 0.62
-        txr_fit(x_right, y, value, max_w, size=size, min_size=6.0, bold=bold, col=col)
+    # ═ 2. LECTURA (reemplaza el "dictamen") ═
+    h2 = 40
+    rr(left, y - h2, cw, h2, 8, card)
+    cv.setFillColor(status_col); cv.roundRect(left, y - h2, 4, h2, 2, stroke=0, fill=1)
+    tx_fit(left + 12, y - 13, ev.reading.headline, cw - 24, size=9.6, bold=True, col=status_col)
+    crit_txt = "Variable crítica — " + describe_break(ev.critical, C)
+    tx_fit(left + 12, y - 25, crit_txt, cw - 24, size=7.2, col=text)
+    sub = ev.reading.detail + (f"  ·  {r.compat_banner}" if r.compat_banner else "")
+    tx_fit(left + 12, y - 35, sub, cw - 24, size=6.6, col=bad if r.compat_banner else muted)
+    y -= h2 + GAP
 
-    # ── Fondo ─────────────────────────────────────────────────────────────────
-    cv.setFillColor(bg)
-    cv.rect(0, 0, W, H, stroke=0, fill=1)
-
-    mg    = int(0.375 * inch)    # 27 pt
-    top   = H - mg               # 765
-    left  = mg                   # 27
-    right = W - mg               # 585
-    cw    = right - left         # 558
-    GAP   = 8
-
-    # ── Layout vertical — ocupa la hoja completa ──────────────────────────────
-    h1_h  = 100   # header
-    kpi_h = 64    # KPI strip
-    # Mid + Bot ocupan el resto
-    used_fixed = h1_h + GAP + kpi_h + GAP + GAP + GAP + 22   # 22 = footer area
-    avail_flex = (top - mg) - used_fixed
-    mid_h = int(avail_flex * 0.45)   # Decisión/Value Bridge: contenido más compacto
-    bot_h = avail_flex - mid_h       # FCF bars/Monte Carlo: más aire para el histograma
-
-    # ══ BLOQUE 1 — HEADER ════════════════════════════════════════════════════
-    rr(left, top - h1_h, cw, h1_h, r=10, fill=card2)
-    # Barra accent izquierda
-    cv.setFillColor(accent)
-    cv.roundRect(left, top - h1_h, 5, h1_h, 3, stroke=0, fill=1)
-
-    id_left  = left + 14
-    id_right = right - 14
-    id_w     = id_right - id_left
-
-    tx(id_left, top-17, f"ONE-PAGER EJECUTIVO  —  EVALUACIÓN FINANCIERA  ({C})", size=11, bold=True)
-
-    # Pill DICTAMEN — arriba a la derecha, tamaño ajustado al texto (no invade
-    # la columna de identificación de abajo, evitando cualquier solapamiento).
-    pill_col = good if onepager.verdict == "APROBADO" else (bad if onepager.verdict == "RECHAZADO" else warn_c)
-    pill_txt = f"DICTAMEN: {onepager.verdict}"
-    ph = 20
-    pw = min(_pdfmetrics.stringWidth(pill_txt, "Helvetica-Bold", 9.5) + 26, id_w * 0.42)
-    px = id_right - pw
-    py = top - 9 - ph
-    cv.setFillColor(colors.Color(pill_col.red, pill_col.green, pill_col.blue, alpha=0.18))
-    cv.setStrokeColor(colors.Color(pill_col.red, pill_col.green, pill_col.blue, alpha=0.55))
-    cv.setLineWidth(1.0)
-    cv.roundRect(px, py, pw, ph, 10, stroke=1, fill=1)
-    txc_fit(px + pw/2, py + ph/2 - 3.2, pill_txt, pw - 10, size=9.5, min_size=7.0, bold=True, col=pill_col)
-
-    hdiv(id_left, py - 7, id_right)
-
-    # Columna de identificación — ancho completo, con truncado defensivo por si
-    # el texto libre (proyecto / responsable / integrantes) fuera muy largo.
-    row_y = py - 20
-    tx_fit(id_left, row_y, onepager.institution, id_w, size=7.6, min_size=6.5, col=muted)
-    txr(id_right, row_y, f"Fecha: {onepager.report_date}", size=7.6, col=muted)
-    row_y -= 12
-    tx_fit(id_left, row_y, onepager.programa, id_w, size=9, min_size=7.0, bold=True, col=accent)
-    row_y -= 12
-    tx_fit(id_left, row_y, f"Proyecto: {onepager.project}", id_w, size=7.8, min_size=6.5, col=text)
-    row_y -= 11
-    tx_fit(id_left, row_y, f"Responsable: {onepager.responsible}", id_w, size=7.5, min_size=6.5, col=muted)
-    if onepager.integrantes.strip():
-        row_y -= 11
-        integs = " · ".join(p.strip() for p in onepager.integrantes.strip().replace("\n", ",").split(",") if p.strip())
-        tx_fit(id_left, row_y, f"Integrantes: {integs}", id_w, size=7.2, min_size=6.2, col=muted)
-
-    y = top - h1_h - GAP
-
-    # ══ BLOQUE 2 — KPI STRIP ═════════════════════════════════════════════════
-    # 4 tarjetas amplias (en vez de 6 estrechas) para que quepan sin recortarse
-    # montos grandes en Gs. (PYG en unidades completas).
-    kpi_n   = 4
-    kpi_gap = 8
-    kpi_w   = (cw - kpi_gap * (kpi_n - 1)) / kpi_n
-    kpi_pad = 10
-
-    pb   = "N/A" if onepager.payback_simple is None     else f"{onepager.payback_simple:.1f} años"
-    pbd  = "N/A" if onepager.payback_discounted is None else f"{onepager.payback_discounted:.1f} años"
-    prob = "—"   if onepager.prob_neg is None           else f"{onepager.prob_neg*100:.1f}%"
-
-    van_good  = (onepager.npv_base or 0) > 0
-    p50_good  = (onepager.p50 or 0) > 0
-    prob_ok   = onepager.prob_neg is not None and onepager.prob_neg <= 0.20
-
+    # ═ 3. KPIs ═
+    kh, kn, kg = 56, 4, 6
+    kw = (cw - kg * (kn - 1)) / kn
+    van_c = good if m.van_main > 0 else bad
     kpis = [
-        ("VAN (base)", fc(onepager.npv_base), "Escenario determinístico", good if van_good else bad),
-        ("TIR (base)", fp(onepager.irr_base), f"vs. WACC {fp(onepager.wacc)}", accent),
-        ("Payback",    f"{pb} / {pbd}",       "Simple / descontado", accent),
-        ("P(VAN<0)",   prob,                  f"Monte Carlo · P50 {fcs(onepager.p50)}", good if prob_ok else bad),
+        (f"VAN — {MODE_LABEL.get(m.mode, m.mode)}", fcs(m.van_main), f"IR {m.ir_sin_vt:.2f} · TIRM {fmt_pct(m.mirr_sin_vt)}", van_c),
+        ("VAN sin VT" if m.mode != "none" else "VAN con VT (referencial)",
+         fcs(m.van_sin_vt if m.mode != "none" else m.van_con_vt),
+         f"Peso del VT: {fmt_pct(m.vt_weight, 1)}", good if (m.van_sin_vt if m.mode != "none" else m.van_con_vt) > 0 else bad),
+        ("TIR sin VT (principal)", fmt_pct(m.irr_sin_vt), f"con VT (secund.): {fmt_pct(m.irr_con_vt)} · WACC {fmt_pct(m.wacc, 2)}",
+         good if (m.irr_sin_vt or 0) > m.wacc else bad),
+        ("Payback simple / desc.", f"{ve.fmt_years(m.payback)} / {ve.fmt_years(m.payback_disc)} años",
+         f"EAA {fcs(m.eaa)}", accent),
     ]
+    kb = y - kh
+    for i, (lbl, val, sub, vc) in enumerate(kpis):
+        kx = left + i * (kw + kg)
+        rr(kx, kb, kw, kh, 7, card)
+        cv.setFillColor(vc); cv.roundRect(kx, kb + kh - 4, kw, 4, 2, stroke=0, fill=1)
+        aw = kw - 16
+        tx_fit(kx + 8, kb + kh - 15, lbl, aw, size=6.6, bold=True, col=muted)
+        tx_fit(kx + 8, kb + 22, val, aw, size=12, min_size=7.5, bold=True, col=vc)
+        tx_fit(kx + 8, kb + 8, sub, aw, size=5.9, min_size=5.0, col=muted)
+    y = kb - GAP
 
-    kbot = y - kpi_h
-    for i, (lbl, val, sub, val_col) in enumerate(kpis):
-        kx = left + i * (kpi_w + kpi_gap)
-        rr(kx, kbot, kpi_w, kpi_h, r=7, fill=card)
-        cv.setFillColor(val_col)
-        cv.roundRect(kx, kbot + kpi_h - 4, kpi_w, 4, 2, stroke=0, fill=1)
-        avail_w = kpi_w - 2 * kpi_pad
-        tx(kx+kpi_pad, kbot + kpi_h - 16, lbl, size=7.2, bold=True, col=muted)
-        tx_fit(kx+kpi_pad, kbot + 24, val, avail_w, size=13, min_size=8.0, bold=True, col=val_col)
-        tx_fit(kx+kpi_pad, kbot + 9,  sub, avail_w, size=6.4, min_size=5.5, col=muted)
+    # ═ 4. WACC (izq) + VALOR Y FLUJOS (der) ═
+    h3 = 168
+    lw = cw * 0.50 - 3; rw = cw - lw - 6; rx = left + lw + 6
+    b3 = y - h3
+    rr(left, b3, lw, h3, 8); rr(rx, b3, rw, h3, 8)
+    sec(left + 10, b3 + h3 - 14, f"TASA EN {wb.rate_currency.upper()} (WACC)")
+    hdiv(left + 10, b3 + h3 - 19, left + lw - 10)
+    yy = b3 + h3 - 30
+    has_capm = wb.rf == wb.rf
+    rows = []
+    if has_capm:
+        rows += [("Rf (USD)", fmt_pct(wb.rf, 4)), ("β desapalancada → apalancada", f"{wb.beta_u:.3f} → {wb.beta_l:.3f}"),
+                 ("ERP", fmt_pct(wb.erp, 4)), ("CRP (riesgo país)", fmt_pct(wb.crp, 4)),
+                 ("Prima por tamaño", fmt_pct(wb.size_premium, 4))]
+    rows += [("Ke en USD", fmt_pct(wb.ke_usd, 4)), (f"π {wb.flow_currency} / π USD", f"{fmt_pct(wb.infl_flow, 2)} / {fmt_pct(wb.infl_usd, 2)}"),
+             (f"Ke en {wb.flow_currency}", fmt_pct(wb.ke_flow, 4)),
+             ("Kd antes / después de IRE", f"{fmt_pct(wb.kd_pre, 4)} / {fmt_pct(wb.kd_post, 4)}"),
+             ("Pesos E/V · D/V", f"{fmt_pct(wb.wE, 2)} · {fmt_pct(wb.wD, 2)}")]
+    for lab, val in rows:
+        kv(left + 12, left + lw - 12, yy, lab, val, size=6.9); yy -= 10.2
+    hdiv(left + 10, yy + 8, left + lw - 10)
+    yy -= 3
+    kv(left + 12, left + lw - 12, yy, "WACC (tasa usada)", fmt_pct(wb.wacc, 4), size=8, bold=True, col=accent)
+    if wb.mismatch:
+        tx_fit(left + 12, yy - 11, "(!) Tasa en USD sin convertir al flujo en " + wb.flow_currency, lw - 24, size=6.6, col=bad)
 
-    y = kbot - GAP
+    sec(rx + 10, b3 + h3 - 14, "VALOR Y FLUJOS")
+    hdiv(rx + 10, b3 + h3 - 19, rx + rw - 10)
+    vy = b3 + h3 - 30
+    term_lbl = {"none": "Recupero de capital de trabajo", "salvage": "Desecho neto + recupero CT", "perpetuity": "PV valor terminal (perpetuidad)"}[m.mode]
+    pv_term = ve.pv_terminal(ev.valuation)
+    for lab, val, bold, col in [("PV FCF explícitos (1..N)", fc(m.pv_ops), False, text),
+                                (f"PV {term_lbl.split('PV ')[-1]}", fc(pv_term), False, text),
+                                ("− CAPEX inicial", fc(-ev.flows.capex0[0]), False, text),
+                                ("VAN (decisión)", fc(m.van_main), True, van_c)]:
+        if bold:
+            hdiv(rx + 10, vy + 8, rx + rw - 10); vy -= 3
+        kv(rx + 12, rx + rw - 12, vy, lab, val, size=7.0 if not bold else 7.8, bold=bold, col=col); vy -= 10.5
+    vy -= 4
+    sec(rx + 10, vy, "FCF POR AÑO", size=7.0); vy -= 11
+    fl = list(ev.flows.fcf_ops[0])
+    for i, v in enumerate(fl, 1):
+        if vy < b3 + 10:
+            tx(rx + 12, vy + 9, f"(+{len(fl) - i + 1} año(s) más)", size=6.2, col=muted); break
+        kv(rx + 12, rx + rw - 12, vy, f"Año {i}", fc(v), size=6.7, col=good if v >= 0 else bad); vy -= 8.6
+    y = b3 - GAP
 
-    # ══ BLOQUE 3 — DECISIÓN (izq 54%) + VALUE BRIDGE (der 46%) ══════════════
-    lw  = cw * 0.54 - 4
-    rw  = cw - lw - 8
-    lx  = left
-    rx  = left + lw + 8
+    # ═ 5. ALERTAS + PESIMISTA (izq) | MONTE CARLO (der) ═
+    foot_h = 40
+    b4 = mg + foot_h
+    h4 = y - b4
+    rr(left, b4, lw, h4, 8); rr(rx, b4, rw, h4, 8)
+    sec(left + 10, b4 + h4 - 14, "ESCENARIO PESIMISTA Y ALERTAS ACTIVAS")
+    hdiv(left + 10, b4 + h4 - 19, left + lw - 10)
+    yy = b4 + h4 - 30
+    pm = ev.pess_mult
+    if pm:
+        tx_fit(left + 12, yy, f"Precio ×{pm['price']:.2f} · Vol. ×{pm['volume']:.2f} · CV ×{pm['unit_vc']:.2f} · CF ×{pm['fixed']:.2f} · CAPEX ×{pm['capex']:.2f} · WACC +{pm['wacc'] * 100:.1f} pp",
+               lw - 24, size=6.2, col=muted); yy -= 10
+        kv(left + 12, left + lw - 12, yy, "VAN pesimista (decisión)", fc(ev.pess_van_main), size=7.0,
+           col=good if ev.pess_van_main >= 0 else bad, bold=True); yy -= 12
+    # Alertas y, a continuación, punto de equilibrio por variable
+    bes = list(ev.breakevens)
+    nb = len(bes)
+    tbl_h = nb * 9.0 + 24
+    sev_col = {"alta": bad, "media": warn_c, "info": muted}
+    if ev.alerts:
+        for a in _alerts_sorted(ev):
+            if yy < b4 + 10 + tbl_h + 8:
+                tx(left + 12, yy + 8, "(más alertas en el TXT)", size=6.0, col=muted); break
+            tx_fit(left + 12, yy, f"[{a.severity.upper()}] {a.code} · {a.title}", lw - 24, size=6.6, col=sev_col.get(a.severity, muted)); yy -= 9
+    else:
+        tx(left + 12, yy, "Sin alertas activas.", size=7.0, col=good); yy -= 9
+    tb_top = max(yy - 6, b4 + 10 + tbl_h)
+    hdiv(left + 10, tb_top + 4, left + lw - 10)
+    sec(left + 10, tb_top - 8, "PUNTO DE EQUILIBRIO (VAN = 0, ceteris paribus)", size=6.8)
+    ty2 = tb_top - 19
+    for x in bes:
+        is_c = ev.critical is not None and x.driver == ev.critical.driver
+        if x.limit_value is None:
+            val = "sin valor en el rango"
+        elif x.unit == "money":
+            val = f"{fcs(x.limit_value)} ({x.rel_change * 100:+.1f}%)"
+        elif x.unit == "pct":
+            val = f"{fmt_pct(x.limit_value, 2)} ({x.rel_change * 100:+.1f}%)"
+        else:
+            val = f"{x.limit_value * 100:.1f}% del nivel base ({x.rel_change * 100:+.1f}%)"
+        kv(left + 12, left + lw - 12, ty2, x.label + ("  (crítica)" if is_c else ""), val, size=6.3,
+           col=accent if is_c else text, bold=is_c)
+        ty2 -= 9.0
 
-    mid_y = y - mid_h
-    rr(lx, mid_y, lw, mid_h, r=8, fill=card)
-    rr(rx, mid_y, rw, mid_h, r=8, fill=card)
+    sec(rx + 10, b4 + h4 - 14, "RIESGO — MONTE CARLO")
+    hdiv(rx + 10, b4 + h4 - 19, rx + rw - 10)
+    ml, mr = rx + 10, rx + rw - 10
+    my = b4 + h4 - 30
+    if ev.mc is not None:
+        s = ev.mc.stats
+        for lab, val, col in [("Simulaciones", f"{s['n']:,}".replace(",", "."), muted),
+                              ("P(VAN<0)", fmt_pct(s["prob_neg"], 1), good if s["prob_neg"] <= 0.2 else bad),
+                              ("P5 · P50 · P95", f"{fcs(s['p5'])} · {fcs(s['p50'])} · {fcs(s['p95'])}", muted),
+                              ("CVaR5 · σ", f"{fcs(s['cvar5'])} · {fcs(s['std'])}", bad),
+                              ("Caso base en percentil", fmt_pct(s["base_percentile"], 1), muted)]:
+            kv(ml, mr, my, lab, val, size=6.8, col=col); my -= 9.6
+        hx, hy, hw = rx + 12, b4 + 10, rw - 24
+        hh = max(my - hy - 4, 20)
+        cv.setFillColor(colors.Color(1, 1, 1, alpha=0.04)); cv.roundRect(hx, hy, hw, hh, 4, stroke=0, fill=1)
+        if hist_counts is not None and hist_edges is not None and len(hist_counts) > 0:
+            maxc = max(hist_counts) or 1
+            nb = len(hist_counts); bw = hw / nb
+            lo, hi = float(hist_edges[0]), float(hist_edges[-1])
+            for i, cnt in enumerate(hist_counts):
+                mid = (hist_edges[i] + hist_edges[i + 1]) / 2
+                ch = bad if mid < 0 else accent
+                cv.setFillColor(colors.Color(ch.red, ch.green, ch.blue, alpha=0.65))
+                cv.rect(hx + i * bw, hy, bw * 0.9, (cnt / maxc) * hh, stroke=0, fill=1)
 
-    # — Decisión & supuestos —
-    card_bottom_l = mid_y + 8   # margen inferior de seguridad de esta tarjeta
-    sec(lx+10, mid_y + mid_h - 15, "DECISIÓN & SUPUESTOS")
-    hdiv(lx+10, mid_y + mid_h - 21, lx + lw - 10)
-    yy = para(lx+10, mid_y + mid_h - 33, onepager.rationale, w=63, size=7.8, leading=10.5,
-              min_y=card_bottom_l, max_lines=4)
-    yy -= 10
+            def x_at(v): return hx + (float(v) - lo) / (hi - lo) * hw if hi > lo else hx
+            if lo < 0 < hi:
+                cv.setStrokeColor(colors.Color(bad.red, bad.green, bad.blue, alpha=0.85)); cv.setLineWidth(1.2); cv.setDash()
+                cv.line(x_at(0), hy, x_at(0), hy + hh)
+            for v in (s["p5"], s["p50"], s["p95"]):
+                if math.isfinite(v):
+                    cv.setStrokeColor(colors.Color(1, 1, 1, alpha=0.38)); cv.setLineWidth(0.8); cv.setDash(3, 3)
+                    cv.line(x_at(v), hy, x_at(v), hy + hh); cv.setDash()
+            if math.isfinite(m.van_main) and lo < m.van_main < hi:
+                cv.setStrokeColor(colors.Color(good.red, good.green, good.blue, alpha=0.9)); cv.setLineWidth(1.0); cv.setDash(1, 2)
+                cv.line(x_at(m.van_main), hy, x_at(m.van_main), hy + hh); cv.setDash()
+    else:
+        tx(ml, my, "Monte Carlo no ejecutado.", size=7.0, col=muted)
 
-    sec(lx+10, yy, "SUPUESTOS CLAVE", size=7.8)
-    yy -= 13
-    for b in [
-        f"Horizonte: {onepager.n_years} años + perpetuidad   g: {fp(onepager.g_exp)}   g∞: {fp(onepager.g_inf)}",
-        f"WACC: {fp(onepager.wacc)}   Ke: {fp(onepager.ke)}   Kd: {fp(onepager.kd)}",
-        f"CAPEX inicial: {fc(onepager.capex0)}",
-        f"FCF Año 1: {fc(onepager.fcf1)}   EBIT: {fc(onepager.ebit)}",
-    ]:
-        if yy < card_bottom_l:
-            break
-        tx_fit(lx+13, yy, "•  " + b, lw - 26, size=7.5, min_size=6.0, col=muted)
-        yy -= 10
-    yy -= 8
-
-    checks_list = list(onepager.checks)
-    if yy >= card_bottom_l + 10:
-        sec(lx+10, yy, "CHECKLIST COMITÉ", size=7.8)
-        yy -= 13
-        for i, (label, ok) in enumerate(checks_list):
-            if yy < card_bottom_l:
-                remaining = len(checks_list) - i
-                tx(lx+13, yy + 10, f"(+{remaining} ítem{'s' if remaining != 1 else ''} más)", size=6.6, col=muted)
-                break
-            c_col = good if ok else bad
-            tx_fit(lx+13, yy, ("✓  " if ok else "✗  ") + label, lw - 26, size=7.5, min_size=6.0, col=c_col)
-            yy -= 10
-
-    # — Estructura del valor —
-    sec(rx+10, mid_y + mid_h - 15, "ESTRUCTURA DEL VALOR")
-    hdiv(rx+10, mid_y + mid_h - 21, rx + rw - 10)
-    tx(rx+10, mid_y + mid_h - 31, "VAN = PV(FCF) + PV(TV) − CAPEX inicial", size=7.4, col=muted)
-
-    def _safe(x):
-        return float(x) if x is not None and math.isfinite(x) else 0.0
-
-    pv_fcf_v = _safe(onepager.pv_fcf)
-    pv_tv_v  = _safe(onepager.pv_tv)
-    capex0_v = _safe(onepager.capex0)
-    total_v  = max(pv_fcf_v + pv_tv_v, 1e-9)
-
-    bx, by2 = rx + 12, mid_y + mid_h - 56
-    bw_vb, bh_vb = rw - 24, 14
-    # Fondo de la barra
-    cv.setFillColor(colors.Color(1, 1, 1, alpha=0.05))
-    cv.roundRect(bx, by2, bw_vb, bh_vb, 4, stroke=0, fill=1)
-    s_fcf = bw_vb * min(max(pv_fcf_v, 0.0) / total_v, 1.0)
-    s_tv  = bw_vb * min(max(pv_tv_v,  0.0) / total_v, 1.0)
-    # roundRect con ancho ~0 genera un artefacto (aspa/triángulo) — se omite el segmento.
-    if s_fcf > 1.0:
-        cv.setFillColor(colors.Color(accent.red, accent.green, accent.blue, alpha=0.80))
-        cv.roundRect(bx, by2, s_fcf, bh_vb, 4, stroke=0, fill=1)
-    if s_tv > 1.0:
-        cv.setFillColor(colors.Color(accent.red, accent.green, accent.blue, alpha=0.38))
-        cv.roundRect(bx + s_fcf, by2, s_tv, bh_vb, 4, stroke=0, fill=1)
-    # Etiquetas dentro de la barra
-    cv.setFont("Helvetica", 5.5)
-    cv.setFillColor(bg)
-    if s_fcf > 28:
-        cv.drawString(bx + 4, by2 + 4, "PV FCF")
-    if s_tv > 22:
-        cv.drawRightString(bx + s_fcf + s_tv - 3, by2 + 4, "PV TV")
-
-    vy = by2 - 14
-    for lbl, val, is_total in [
-        ("PV FCF (ciclo 1..N):",   fc(onepager.pv_fcf), False),
-        ("PV TV (perpetuidad):",   fc(onepager.pv_tv),  False),
-        ("− CAPEX inicial:",       fc(-capex0_v) if capex0_v else "—", False),
-        ("VAN (neto):", fc(onepager.npv_base), True),
-    ]:
-        if is_total:
-            hdiv(rx+10, vy + 13, rx + rw - 10)
-            vy -= 3
-        vc = (good if van_good else bad) if is_total else text
-        kv_row(rx+12, rx + rw - 12, vy, lbl, val, size=7.5, bold=is_total, col=vc)
-        vy -= 12
-
-    # Lista de FCF anuales
-    vy -= 8
-    fcf_list = list(onepager.fcf_years)
-    sec(rx+10, vy, "FCF POR AÑO", size=7.5)
-    vy -= 13
-    for i, f_v in enumerate(fcf_list, 1):
-        if vy < mid_y + 10:
-            remaining = len(fcf_list) - (i - 1)
-            tx(rx+12, vy + 9, f"(+{remaining} año{'s' if remaining != 1 else ''} más)", size=6.6, col=muted)
-            break
-        fc_col = good if f_v >= 0 else bad
-        kv_row(rx+12, rx + rw - 12, vy, f"Año {i}:", fc(f_v), size=7.2, col=fc_col)
-        vy -= 9
-
-    y = mid_y - GAP
-
-    # ══ BLOQUE 4 — FCF BARS (izq 48%) + MONTE CARLO (der 52%) ═══════════════
-    lw2 = cw * 0.46 - 4
-    rw2 = cw - lw2 - 8
-    rx2 = left + lw2 + 8
-
-    bot_y = y - bot_h
-    rr(lx, bot_y, lw2, bot_h, r=8, fill=card)
-    rr(rx2, bot_y, rw2, bot_h, r=8, fill=card)
-
-    # — FCF bars —
-    sec(lx+10, bot_y + bot_h - 15, "FLUJOS DE CAJA PROYECTADOS (FCF)")
-    hdiv(lx+10, bot_y + bot_h - 21, lx + lw2 - 10)
-    tx_fit(lx+10, bot_y + bot_h - 31, f"Valor Terminal Año {onepager.n_years}: {fc(onepager.tv)}",
-           lw2 - 20, size=7.3, min_size=6.0, col=muted)
-
-    f_list  = list(onepager.fcf_years)
-    nb      = len(f_list)
-    bax     = lx + 14
-    baw     = lw2 - 28
-    label_y = bot_y + 9                    # etiquetas "Año N" — franja fija al pie
-    plot_bottom = bot_y + 20                # piso del área de barras (encima de las etiquetas)
-    plot_top    = bot_y + bot_h - 40        # techo del área de barras (debajo del título)
-    bah_total   = max(plot_top - plot_bottom, 10.0)
-
-    max_pos = max([v for v in f_list if v > 0], default=0.0)
-    max_neg = max([-v for v in f_list if v < 0], default=0.0)   # magnitud del más negativo
-    mag_tot = max_pos + max_neg
-    # La línea base se reparte proporcionalmente para que ninguna barra
-    # (positiva o negativa) se salga del recuadro.
-    neg_h = bah_total * (max_neg / mag_tot) if mag_tot > 0 else 0.0
-    pos_h = bah_total - neg_h
-    bay   = plot_bottom + neg_h             # línea de base (cero)
-
-    if nb:
-        gapb  = 6
-        bw_b  = (baw - gapb * (nb - 1)) / nb
-        for i, val in enumerate(f_list):
-            bxi = bax + i * (bw_b + gapb)
-            if val >= 0:
-                bh_b = (val / max_pos * pos_h) if max_pos > 0 else 0.0
-                c_b  = good
-                if bh_b > 0.5:
-                    cv.setFillColor(colors.Color(c_b.red, c_b.green, c_b.blue, alpha=0.72))
-                    cv.roundRect(bxi, bay, bw_b, bh_b, 3, stroke=0, fill=1)
-            else:
-                bh_b = (-val / max_neg * neg_h) if max_neg > 0 else 0.0
-                c_b  = bad
-                if bh_b > 0.5:
-                    cv.setFillColor(colors.Color(c_b.red, c_b.green, c_b.blue, alpha=0.72))
-                    cv.roundRect(bxi, bay - bh_b, bw_b, bh_b, 3, stroke=0, fill=1)
-            # Año label — siempre en la franja fija, nunca se solapa con las barras
-            cv.setFillColor(muted)
-            cv.setFont("Helvetica", 6.5)
-            cv.drawCentredString(bxi + bw_b/2, label_y, f"Año {i+1}")
-
-    # — Monte Carlo —
-    sec(rx2+10, bot_y + bot_h - 15, "RIESGO — MONTE CARLO")
-    hdiv(rx2+10, bot_y + bot_h - 21, rx2 + rw2 - 10)
-
-    # Filas etiqueta/valor con auto-ajuste — evita overflow con montos PYG largos
-    mc_left, mc_right = rx2+10, rx2+rw2-10
-    mly = bot_y + bot_h - 32
-    prob_str = "—" if onepager.prob_neg is None else f"{onepager.prob_neg*100:.1f}%"
-    for lbl, val, s_col in [
-        ("Simulaciones:", f"{onepager.sims:,}".replace(",", "."), muted),
-        ("P(VAN<0):", prob_str, good if prob_ok else bad),
-        ("P5:",    fcs(onepager.p5),    muted),
-        ("P50:",   fcs(onepager.p50),   good if p50_good else bad),
-        ("P95:",   fcs(onepager.p95),   muted),
-        ("CVaR5:", fcs(onepager.cvar5), bad),
-        ("σ:",     fcs(onepager.std),   muted),
-    ]:
-        kv_row(mc_left, mc_right, mly, lbl, val, size=7.2, col=s_col)
-        mly -= 10
-
-    # Histograma
-    hx = rx2 + 12
-    hy = bot_y + 14
-    hw = rw2 - 24
-    hh = max(mly - hy - 6, 20)
-
-    cv.setFillColor(colors.Color(1, 1, 1, alpha=0.04))
-    cv.roundRect(hx, hy, hw, hh, 4, stroke=0, fill=1)
-
-    if hist_counts is not None and hist_edges is not None and len(hist_counts) > 0:
-        maxc = max(hist_counts) if max(hist_counts) > 0 else 1
-        nbh  = len(hist_counts)
-        bwh  = hw / nbh
-        lo   = float(hist_edges[0])
-        hi_e = float(hist_edges[-1])
-
-        for i, cnt in enumerate(hist_counts):
-            bh_h = (cnt / maxc) * hh
-            bxi  = hx + i * bwh
-            mid_v = (hist_edges[i] + hist_edges[i + 1]) / 2
-            ch   = bad if mid_v < 0 else accent
-            cv.setFillColor(colors.Color(ch.red, ch.green, ch.blue, alpha=0.65))
-            cv.rect(bxi, hy, bwh * 0.90, bh_h, stroke=0, fill=1)
-
-        def x_at(v):
-            return hx + (float(v) - lo) / (hi_e - lo) * hw if hi_e > lo else hx
-
-        if lo < 0 < hi_e:
-            xx = x_at(0)
-            cv.setStrokeColor(colors.Color(bad.red, bad.green, bad.blue, alpha=0.85))
-            cv.setLineWidth(1.2)
-            cv.setDash()
-            cv.line(xx, hy, xx, hy + hh)
-
-        for pv_val in [onepager.p5, onepager.p50, onepager.p95]:
-            if pv_val is None or not math.isfinite(pv_val):
-                continue
-            xx = x_at(pv_val)
-            cv.setStrokeColor(colors.Color(1, 1, 1, alpha=0.38))
-            cv.setLineWidth(0.8)
-            cv.setDash(3, 3)
-            cv.line(xx, hy, xx, hy + hh)
-            cv.setDash()
-
-    # ══ FOOTER ══════════════════════════════════════════════════════════════
-    hdiv(left, bot_y - 5, right)
-    cv.setFillColor(muted)
-    cv.setFont("Helvetica", 7)
-    cv.drawString(left, mg + 4, "Uso académico (MBA). Resultados dependen de supuestos; no sustituyen due diligence.")
-    cv.drawRightString(right, mg + 4, f"ValuationSuite USIL v2.0  ·  {C}  ·  {onepager.report_date}")
-
-    cv.showPage()
-    cv.save()
+    # ═ FOOTER: supuestos y limitaciones ═
+    fy = mg + foot_h - 6
+    hdiv(left, fy + 3, right)
+    ty = fy - 6
+    for d in DISCLOSURE[:3] + [DISCLOSURE[3] + " " + DISCLOSURE[4]]:
+        tx_fit(left, ty, "• " + d, cw, size=5.9, min_size=4.9, col=muted); ty -= 7.3
+    cv.setFillColor(muted); cv.setFont("Helvetica", 5.8)
+    cv.drawRightString(right, mg - 4, f"ValuationSuite USIL v{ve.ENGINE_VERSION}  ·  {C}  ·  {r.report_date}")
+    cv.showPage(); cv.save()
     return buf.getvalue()
