@@ -1,4 +1,4 @@
-streamlit>=1.32
+streamlit>=1.63
 numpy>=1.26
 numpy-financial>=1.0
 plotly>=5.20
