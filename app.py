@@ -3,12 +3,14 @@
 # drivers operativos · punto de equilibrio · alertas. Modo compatibilidad = fórmulas v2.0 (solo para contrastar).
 
 from dataclasses import replace
+from html import escape
 from datetime import date
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
+import glosario as gl
 import report_usil as rep
 import valuation_engine as ve
 
@@ -60,6 +62,13 @@ hr { border-color: var(--line); }
 .pill.good { background: rgba(39,209,124,.14); }
 .pill.warn { background: rgba(255,204,102,.14); }
 .pill.bad  { background: rgba(255,93,93,.14); }
+table.edu { width:100%; border-collapse:collapse; }
+table.edu th { color:#66a9ff; text-align:left; font-size:.8rem; padding:6px 8px; border-bottom:1px solid var(--line); }
+table.edu td { padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; font-size:.82rem; }
+table.edu td.n { font-weight:700; white-space:nowrap; }
+table.edu td.v { text-align:right; font-weight:700; white-space:nowrap; color:#eaf1ff; }
+table.edu td.e { color:var(--muted); font-size:.77rem; line-height:1.4; }
+table.edu code { font-size:.74rem; color:#9cc4ff; background:rgba(255,255,255,.06); padding:1px 4px; border-radius:4px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -141,6 +150,24 @@ def _money_hint(x) -> None:
     st.sidebar.caption(f"= {fmt_money(x)}")
 
 
+def edu_table(headers, rows) -> str:
+    """Tabla HTML didáctica. Cada fila: [nombre, valor..., explicación_html]. Nombre y valores se escapan;
+    la última celda es HTML ya escapado (viene de glosario.celda_html)."""
+    th = "".join(f"<th>{escape(h)}</th>" for h in headers)
+    body = ""
+    for r in rows:
+        tds = f'<td class="n">{escape(str(r[0]))}</td>'
+        tds += "".join(f'<td class="v">{escape(str(c))}</td>' for c in r[1:-1])
+        tds += f'<td class="e">{r[-1]}</td>'
+        body += f"<tr>{tds}</tr>"
+    return f'<table class="edu"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
+
+
+def _acad(key: str, extra: str = "") -> str:
+    """Tooltip: explicación académica (glosario) + nota práctica de cómo se usa aquí."""
+    return gl.ayuda(key) + (f"\n\n**En esta calculadora:** {extra}" if extra else "")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar — inputs
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,9 +182,9 @@ with st.sidebar.expander("ℹ️ ¿Cómo usar esta aplicación?", expanded=False
 
 st.sidebar.divider()
 st.sidebar.header("🧩 Identificación")
-programa = st.sidebar.text_input("Programa", "MBA USIL")
-project = st.sidebar.text_input("Proyecto", "Proyecto ABC")
-responsible = st.sidebar.text_input("Responsable", "Docente: Jorge Rojas")
+programa = st.sidebar.text_input("Programa", "MBA USIL", help="Programa académico o curso al que pertenece el trabajo (por ejemplo, MBA USIL). Se imprime en el encabezado del reporte.")
+project = st.sidebar.text_input("Proyecto", "Proyecto ABC", help="Nombre del proyecto de inversión que se evalúa. Aparece en el encabezado y en el nombre de los escenarios guardados.")
+responsible = st.sidebar.text_input("Responsable", "Docente: Jorge Rojas", help="Persona o docente responsable del análisis. Se imprime en el reporte.")
 integrantes = st.sidebar.text_area("Integrantes", "", help="Nombres de los integrantes del equipo (se imprimirán en el PDF).")
 
 st.sidebar.divider()
@@ -172,24 +199,27 @@ st.sidebar.divider()
 st.sidebar.header("1) Costo del capital propio (CAPM)")
 st.sidebar.caption("Parámetros en USD (p. ej. Damodaran). El modelo los convierte a la moneda del flujo.")
 rf = st.sidebar.number_input("Rf (%) — USD", value=4.5, step=0.1,
-    help="Tasa libre de riesgo en USD (bono del Tesoro EE. UU. a 10 años). Debe ser coherente con la moneda de ERP y β.") / 100
+    help=_acad("rf", "ingresá la Rf en USD (bono del Tesoro de EE. UU. a 10 años); debe ser coherente con la moneda de la ERP y de la β.")) / 100
 erp = st.sidebar.number_input("ERP (%)", value=5.5, step=0.1,
-    help="Prima de riesgo de mercado (USD). Usá una estimación prospectiva y citá la fuente.") / 100
+    help=_acad("erp", "valor en USD; citá la fuente y el año de la estimación.")) / 100
 crp = st.sidebar.number_input("CRP (%) — riesgo país", value=2.0, step=0.1,
-    help="Prima de riesgo país. Aquí se suma al Ke; no la dupliques en los flujos.") / 100
+    help=_acad("crp", "se suma al Ke; no la dupliques ajustando también los flujos.")) / 100
 size_prem = st.sidebar.number_input("Prima por tamaño (%) — opcional", value=0.0, step=0.1,
-    help="Prima adicional para empresas pequeñas/no cotizadas. Dejá 0 si no la justificás.") / 100
+    help=_acad("size", "dejá 0 si no podés justificarla.")) / 100
 beta_u = st.sidebar.number_input("βU (desapalancada)", value=0.90, step=0.05,
-    help="Beta sin efecto de la deuda, del sector. Se reapalanca con la estructura OBJETIVO (Hamada).")
+    help=_acad("beta_u", "se reapalanca con la estructura objetivo de la sección 2 (fórmula de Hamada); el resultado figura en la tabla de la tasa de descuento."))
 tax_rate = st.sidebar.number_input("IRE (%)", value=10.0, step=0.5,
-    help="Impuesto a la renta empresarial. Paraguay (IRE): 10 %. Se aplica solo cuando el EBIT es positivo.") / 100
+    help=_acad("ire", "se aplica sobre el EBIT positivo y también reduce el costo de la deuda (escudo fiscal).")) / 100
 
 st.sidebar.markdown("**Inflación (conversión de moneda)**")
 pi_usd = st.sidebar.number_input("π USD (%)", value=2.5, step=0.1,
-    help="Inflación esperada de largo plazo del USD.") / 100
+    help=_acad("pi", "π USD es la inflación esperada de largo plazo en dólares (referencia habitual: 2 % a 2,5 %). "
+                     "Si el flujo está en USD no hay conversión: la π del flujo es esta misma.")) / 100
 if _IS_PYG:
     pi_flow = st.sidebar.number_input("π Gs (%)", value=3.5, step=0.1,
-        help="Inflación esperada de largo plazo en guaraníes. Ke_Gs = (1+Ke_USD)·(1+π_Gs)/(1+π_USD) − 1.") / 100
+        help=_acad("pi", "π Gs es la inflación esperada de largo plazo en guaraníes: usá una proyección oficial y citá la fuente "
+                         "(el benchmark del curso usa 3,5 %). Cuanto mayor sea π Gs frente a π USD, más alta resulta la tasa en guaraníes. "
+                         "Debe ser coherente con el crecimiento de ventas y costos (nominales); también indexa el CAPEX de reposición.")) / 100
     convert = st.sidebar.checkbox("Convertir Ke a guaraníes", value=True,
         help="Desmarcarlo aplica el Ke en USD a flujos en guaraníes (error de moneda de la v2.0). Dispara la alerta V07.")
 else:
@@ -197,38 +227,40 @@ else:
 
 st.sidebar.divider()
 st.sidebar.header("2) Estructura de capital OBJETIVO")
+st.sidebar.caption("Proporciones objetivo de deuda y capital propio: definen los pesos del WACC y reapalancan la beta.")
 debt = st.sidebar.number_input(f"Deuda (D) [{CURRENCY}]", value=_DEF["debt"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
-    help="Usá la estructura objetivo a valores de mercado, no la contable ni la financiación puntual del proyecto.")
+    help=_acad("weights", "ingresá la deuda de la estructura objetivo a valores de mercado, no la contable ni la financiación puntual de este proyecto."))
 _money_hint(debt)
 equity_bk = st.sidebar.number_input(f"Capital propio (E) [{CURRENCY}]", value=_DEF["equity"], step=_DEF["step_big"], min_value=1.0, format=_money_fmt,
-    help="Aporte de los socios en la estructura objetivo. Solo sus proporciones (D/V, E/V) importan.")
+    help=_acad("weights", "capital propio de la estructura objetivo; solo importan las proporciones D/V y E/V, no los montos."))
 _money_hint(equity_bk)
 kd = st.sidebar.number_input(f"Kd (%) — en {CURRENCY}", value=_DEF["kd"], step=0.25,
-    help="Costo de la deuda ANTES de impuestos, EN LA MONEDA DEL FLUJO: el rendimiento de mercado actual (YTM) de deuda comparable, "
-         "no la tasa cupón histórica. El modelo aplica (1−IRE).") / 100
+    help=_acad("kd", "ingresá el Kd ANTES de impuestos, EN LA MONEDA DEL FLUJO: el rendimiento de mercado actual (YTM) de deuda comparable, "
+                     "no la tasa cupón histórica. El modelo aplica (1 − IRE).")) / 100
 
 st.sidebar.divider()
 st.sidebar.header("3A) Operación — Año 1 a capacidad plena")
+st.sidebar.caption("Datos del primer año con el negocio a plena capacidad: son la base para proyectar ingresos, costos y capital de trabajo.")
 sales_y1 = st.sidebar.number_input(f"Ventas Año 1 [{CURRENCY}]", value=_DEF["sales"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
-    help="Ingresos del primer año si el proyecto operara a plena capacidad (la rampa de arranque se aplica aparte).")
+    help=_acad("ingresos", "ingresos del primer año si el proyecto operara a plena capacidad; la rampa de arranque se aplica aparte."))
 _money_hint(sales_y1)
 cvar_y1 = st.sidebar.number_input(f"Costos variables [{CURRENCY}]", value=_DEF["cvar"], step=_DEF["step_med"], min_value=0.0, format=_money_fmt,
-    help="Costos que varían con el volumen (materia prima, comisiones, transporte). Se proyectan como % de las ventas a precios base.")
+    help=_acad("costos_var", "se proyectan como % de las ventas a precios base."))
 _money_hint(cvar_y1)
 cfix_y1 = st.sidebar.number_input(f"Costos fijos [{CURRENCY}]", value=_DEF["cfix"], step=_DEF["step_big"], min_value=0.0, format=_money_fmt,
-    help="Costos que no cambian con el volumen (alquileres, sueldos, seguros). Excluí depreciación e intereses.")
+    help=_acad("costos_fijos", "excluí depreciación e intereses (se tratan aparte)."))
 _money_hint(cfix_y1)
 dep_years = int(st.sidebar.number_input("Vida contable de los activos (años)", value=8, min_value=1, max_value=50, step=1,
-    help="Depreciación en línea recta del CAPEX inicial y de cada reposición. Es un gasto contable: reduce el IRE, no es caja."))
+    help=_acad("dep", "línea recta del CAPEX inicial y de cada reposición, a lo largo de esta vida contable.")))
 maint_pct = st.sidebar.number_input("Reposición anual (% de la depreciación)", value=100.0, step=5.0, min_value=0.0,
-    help="CAPEX de mantenimiento/reposición de cada año como % de la depreciación de la base inicial. Debe ser ≥ 100 % para sostener el negocio.")
+    help=_acad("capex_repl", "reposición de cada año como % de la depreciación de la base inicial; debe ser ≥ 100 % para sostener el negocio."))
 st.sidebar.markdown("**Capital de trabajo — saldos al cierre del Año 1**")
 d_ar = st.sidebar.number_input(f"Cuentas por cobrar [{CURRENCY}]", value=_DEF["ar"], step=_DEF["step_wc"], format=_money_fmt,
-    help="Saldo de clientes. El capital de trabajo total se proyecta proporcional a las ventas; sus aumentos reducen el FCF.")
+    help=_acad("dnwc", "saldo de clientes al cierre del Año 1; el capital de trabajo total se proyecta proporcional a las ventas."))
 d_inv = st.sidebar.number_input(f"Inventarios [{CURRENCY}]", value=_DEF["inv"], step=_DEF["step_wc"], format=_money_fmt,
-    help="Saldo de inventarios.")
+    help=_acad("dnwc", "saldo de inventarios al cierre del Año 1."))
 d_ap = st.sidebar.number_input(f"Cuentas por pagar [{CURRENCY}]", value=_DEF["ap"], step=_DEF["step_wc"], format=_money_fmt,
-    help="Saldo de proveedores: financia parte del capital de trabajo.")
+    help=_acad("dnwc", "saldo de proveedores al cierre del Año 1: financia parte del capital de trabajo y por eso resta."))
 nwc_y1 = d_ar + d_inv - d_ap
 st.sidebar.caption(f"Capital de trabajo neto Año 1 = {fmt_money(nwc_y1)}")
 ramp_years = int(st.sidebar.number_input("Años de rampa de arranque", value=0, min_value=0, max_value=5, step=1,
@@ -238,14 +270,16 @@ ramp_start = st.sidebar.slider("Nivel del Año 1 (% de la capacidad plena)", 10,
 
 st.sidebar.divider()
 st.sidebar.header("3B) Proyección")
+st.sidebar.caption("Horizonte de evaluación y crecimientos nominales (en la moneda del flujo).")
 n_years = int(st.sidebar.slider("Años de proyección (N)", 3, 10, 5, help="Horizonte explícito del flujo."))
 g_exp = st.sidebar.number_input("g ventas (%)", value=5.0, step=0.25,
-    help="Crecimiento nominal anual de las ventas. Debe ser coherente con la inflación de la moneda del flujo.") / 100
+    help=_acad("ingresos", "crecimiento NOMINAL anual de las ventas; debe ser coherente con la inflación de la moneda del flujo.")) / 100
 g_fix = st.sidebar.number_input("g costos fijos (%)", value=3.5, step=0.25,
-    help="Crecimiento nominal anual de los costos fijos (típicamente la inflación).") / 100
+    help=_acad("costos_fijos", "crecimiento nominal anual de los costos fijos (típicamente la inflación).")) / 100
 
 st.sidebar.divider()
 st.sidebar.header("3C) Valor terminal (VT)")
+st.sidebar.caption("Qué se supone que ocurre con el proyecto después del último año proyectado.")
 _MODES = {
     "Sin valor terminal (recomendado)": "none",
     "Valor de desecho": "salvage",
@@ -271,14 +305,19 @@ recover_nwc = st.sidebar.checkbox("Recuperar capital de trabajo al final", value
 
 st.sidebar.divider()
 st.sidebar.header("4) Monte Carlo — drivers operativos")
-sims = int(st.sidebar.slider("Simulaciones", 5_000, 60_000, 15_000, 1_000))
+st.sidebar.caption("Se sortean miles de combinaciones de precio, volumen, costos, CAPEX y WACC dentro de los rangos, para medir cuánto se dispersa el VAN.")
+sims = int(st.sidebar.slider("Simulaciones", 5_000, 60_000, 15_000, 1_000,
+    help="Cantidad de escenarios aleatorios que se simulan. Más simulaciones dan resultados más estables (P5, P50, P95) pero tardan un poco más. 10.000 a 20.000 suele bastar."))
 dist = {"Triangular": "triangular", "Normal truncada": "normal"}[st.sidebar.selectbox("Distribución", ["Triangular", "Normal truncada"],
     help="Normal truncada: media = caso base, σ = (rango)/4, acotada al rango.")]
-fixed_seed = st.sidebar.checkbox("Semilla fija (reproducible)", value=True)
+fixed_seed = st.sidebar.checkbox("Semilla fija (reproducible)", value=True,
+    help="Con semilla fija, los mismos datos producen siempre los mismos resultados y el mismo reporte. Desmarcala para ver la variación natural entre corridas.")
 with st.sidebar.expander("Rangos de los drivers (% vs. caso base)", expanded=False):
     def _rng(label, lo, hi, helptxt):
-        a = st.number_input(f"{label} mín (%)", value=float(lo), step=1.0, help=helptxt, key=f"{label}_lo")
-        b = st.number_input(f"{label} máx (%)", value=float(hi), step=1.0, key=f"{label}_hi")
+        a = st.number_input(f"{label} mín (%)", value=float(lo), step=1.0, key=f"{label}_lo",
+                            help=helptxt + " Este es el límite inferior del rango (variación mínima respecto del caso base; negativo = baja).")
+        b = st.number_input(f"{label} máx (%)", value=float(hi), step=1.0, key=f"{label}_hi",
+                            help=helptxt + " Este es el límite superior del rango (variación máxima respecto del caso base).")
         return (1 + a / 100, 1.0, 1 + b / 100)
     r_price = _rng("Precio", -8, 8, "Variación del precio de venta.")
     r_vol = _rng("Volumen / ocupación", -10, 10, "Variación del volumen vendido (afecta ingresos y costos variables).")
@@ -292,9 +331,9 @@ with st.sidebar.expander("Rangos de los drivers (% vs. caso base)", expanded=Fal
         help="Todos los drivers en su lado adverso a la vez (determinístico).")
 if compat:
     st.sidebar.caption("Monte Carlo v2.0 (solo modo compatibilidad)")
-    g_min_mc = st.sidebar.number_input("g mín (%)", value=2.0, step=0.25) / 100
-    g_mode_mc = st.sidebar.number_input("g base (%)", value=5.0, step=0.25) / 100
-    g_max_mc = st.sidebar.number_input("g máx (%)", value=8.0, step=0.25) / 100
+    g_min_mc = st.sidebar.number_input("g mín (%)", value=2.0, step=0.25, help="Peor caso de crecimiento en el Monte Carlo de la v2.0.") / 100
+    g_mode_mc = st.sidebar.number_input("g base (%)", value=5.0, step=0.25, help="Crecimiento más probable en el Monte Carlo de la v2.0.") / 100
+    g_max_mc = st.sidebar.number_input("g máx (%)", value=8.0, step=0.25, help="Mejor caso de crecimiento en el Monte Carlo de la v2.0.") / 100
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Encabezado
@@ -318,15 +357,17 @@ if compat:
                                    (max(capex0 * 0.9, 1.0), capex0, capex0 * 1.1), (0.85, 1.0, 1.15), seed)
     st_mc = ve.mc_stats(npv_mc)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("VAN (con VT)", fmt_money_short(res["van"]), "v2.0")
-    c2.metric("TIR (con VT)", fmt_pct(res["irr"]) if res["irr"] is not None else "N/A", "v2.0 (N/A si > 200 %)")
-    c3.metric("WACC (sin convertir moneda)", ve.fmt_rate(wl["wacc"]), f"Ke {ve.fmt_rate(wl['ke'])} · Kd {ve.fmt_rate(kd)}")
-    c4.metric("Payback", f"{ve.fmt_years(res['payback'])} años", f"desc. {ve.fmt_years(res['payback_disc'])}")
+    c1.metric("VAN (con VT)", fmt_money_short(res["van"]), "v2.0", help="VAN como lo calculaba la v2.0: incluye siempre el valor terminal por perpetuidad. Compará con el VAN sin VT para ver cuánto depende del valor terminal.")
+    c2.metric("TIR (con VT)", fmt_pct(res["irr"]) if res["irr"] is not None else "N/A", "v2.0 (N/A si > 200 %)", help="TIR de la v2.0: suma el valor terminal como caja del año N, por eso suele inflarse. La v2.0 mostraba N/A si superaba 200 %.")
+    c3.metric("WACC (sin convertir moneda)", ve.fmt_rate(wl["wacc"]), f"Ke {ve.fmt_rate(wl['ke'])} · Kd {ve.fmt_rate(kd)}",
+              help="WACC de la v2.0: el Ke calculado en USD se aplicaba tal cual a flujos en otra moneda (sin diferencial de inflación). Por eso el Ke puede quedar por debajo del Kd.")
+    c4.metric("Payback", f"{ve.fmt_years(res['payback'])} años", f"desc. {ve.fmt_years(res['payback_disc'])}",
+              help="Años para recuperar la inversión con flujos sin descontar (y descontados al WACC debajo). Es un indicador secundario: ignora el valor del dinero en el tiempo y lo que ocurre después.")
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("VAN sin VT", fmt_money_short(res["van_sin_vt"]))
-    c6.metric("Peso del VT", fmt_pct(res["vt_pct"], 1) if res["valid_tv"] else "—")
-    c7.metric("P(VAN<0)", fmt_pct(st_mc["prob_neg"], 1), "Monte Carlo v2.0")
-    c8.metric("P50 (VAN)", fmt_money_short(st_mc["p50"]), "Monte Carlo v2.0")
+    c5.metric("VAN sin VT", fmt_money_short(res["van_sin_vt"]), help="VAN considerando solo los flujos del horizonte, sin valor terminal. Si es negativo mientras el VAN con VT es positivo, el resultado depende de la perpetuidad.")
+    c6.metric("Peso del VT", fmt_pct(res["vt_pct"], 1) if res["valid_tv"] else "—", help="Porción del valor presente explicada por el valor terminal. Más de 50 % indica que el resultado depende de lo que pase después del horizonte.")
+    c7.metric("P(VAN<0)", fmt_pct(st_mc["prob_neg"], 1), "Monte Carlo v2.0", help="Probabilidad de VAN negativo según el Monte Carlo de la v2.0, que solo variaba g, WACC, CAPEX y un multiplicador del FCF₁: no ve riesgos de precio, volumen ni costos.")
+    c8.metric("P50 (VAN)", fmt_money_short(st_mc["p50"]), "Monte Carlo v2.0", help="Mediana del VAN simulado: la mitad de los escenarios queda por encima y la mitad por debajo.")
     if res["valid_tv"] and st_mc["n"]:
         verdict, checks = ve.legacy_committee_check(res["van"], st_mc["prob_neg"], st_mc["p50"], st_mc["p5"])
         st.markdown(f"**Dictamen v2.0:** `{verdict}` — " + " · ".join(("✅ " if ok else "❌ ") + lab for lab, ok in checks))
@@ -381,16 +422,19 @@ with hR:
       <div class="small">Lectura de resultados</div>
       <div class="pill {status_cls}" style="font-size:.92rem;">{ev.reading.headline}</div>
       <div class="small" style="margin-top:6px;">{ev.reading.detail}</div>
+      <div class="small" style="margin-top:4px;opacity:.8;">Resume VAN, TIR frente al WACC y probabilidad de pérdida. No es una aprobación: depende de los supuestos cargados.</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("")
 crit_txt = rep.describe_break(ev.critical, CURRENCY)
 st.markdown(f"**Variable crítica:** {crit_txt}")
+st.caption("Es la variable que, con el menor cambio relativo, lleva el VAN a cero: el supuesto que más conviene validar con datos reales.")
 
 if ev.alerts:
     order = {"alta": 0, "media": 1, "info": 2}
     with st.container(border=True):
         st.markdown(f"**Alertas activas ({len(ev.alerts)})**")
+        st.caption("Cada alerta señala un supuesto o un resultado que merece revisión. Severidad alta = puede cambiar la conclusión.")
         for a in sorted(ev.alerts, key=lambda a: (order[a.severity], a.code)):
             msg = f"**{a.code} · {a.title}.** {a.detail}"
             (st.error if a.severity == "alta" else st.warning if a.severity == "media" else st.info)(msg)
@@ -400,78 +444,73 @@ else:
 # ── KPIs ─────────────────────────────────────────────────────────────────────
 mode_txt = rep.MODE_LABEL[m.mode]
 k = st.columns(4, gap="medium")
-k[0].metric(f"VAN — {mode_txt}", fmt_money_short(m.van_main), "Indicador de decisión",
-    help="Valor Actual Neto: criterio principal de decisión. VAN > 0 crea valor al costo de capital. Es la suma de los FCF descontados al WACC más los ítems de cierre del tratamiento elegido, menos el CAPEX inicial.")
-k[1].metric("VAN sin VT", fmt_money_short(m.van_sin_vt), "Solo flujos del horizonte",
-    help="VAN considerando únicamente los flujos explícitos (y el recupero del capital de trabajo). No depende de supuestos más allá del horizonte.")
+k[0].metric(f"VAN — {mode_txt}", fmt_money_short(m.van_main), "Indicador de decisión", help=gl.ayuda("van"))
+k[1].metric("VAN sin VT", fmt_money_short(m.van_sin_vt), "Solo flujos del horizonte", help=gl.ayuda("van_sin_vt"))
 k[2].metric("VAN con VT" + (" (referencial)" if m.con_vt_is_reference else ""), fmt_money_short(m.van_con_vt),
-            "VT desactivado en la decisión" if m.con_vt_is_reference else "Tratamiento elegido",
-    help="VAN si se agregara el valor terminal por perpetuidad (con FCF normalizado: reinversión ≥ depreciación). Es referencial cuando el VT está desactivado.")
-k[3].metric("Peso del VT", fmt_pct(m.vt_weight, 1), "% del valor presente",
-    help="Porción del valor presente explicada por el valor terminal. Más de 50 % indica que el resultado depende de lo que pase después del horizonte.")
+            "VT desactivado en la decisión" if m.con_vt_is_reference else "Tratamiento elegido", help=gl.ayuda("van_con_vt"))
+k[3].metric("Peso del VT", fmt_pct(m.vt_weight, 1), "% del valor presente", help=gl.ayuda("vt_weight"))
 k = st.columns(4, gap="medium")
-k[0].metric("TIR sin VT (principal)", fmt_pct(m.irr_sin_vt), f"vs WACC {fmt_pct(m.wacc, 2)}",
-    help="Tasa interna de retorno de los flujos del horizonte. Compararla con el WACC. Ante conflicto con el VAN, prevalece el VAN.")
-k[1].metric("TIR con VT (secundaria)", fmt_pct(m.irr_con_vt), "Rotulada: incluye VT",
-    help="TIR incluyendo el valor terminal como caja del año N. Indicador secundario: suele inflarse.")
-k[2].metric("TIR modificada (sin VT)", fmt_pct(m.mirr_sin_vt), "Reinversión al WACC",
-    help="TIRM: supone que los flujos se reinvierten y se financian al WACC; evita TIR múltiples y la sobreestimación de la TIR clásica.")
-k[3].metric("Índice de rentabilidad", f"{m.ir_sin_vt:.2f}", "VP flujos / CAPEX (sin VT)",
-    help="IR = 1 + VAN/CAPEX. Útil para ordenar proyectos con racionamiento de capital. IR > 1 equivale a VAN > 0.")
+k[0].metric("TIR sin VT (principal)", fmt_pct(m.irr_sin_vt), f"vs WACC {fmt_pct(m.wacc, 2)}", help=gl.ayuda("tir"))
+k[1].metric("TIR con VT (secundaria)", fmt_pct(m.irr_con_vt), "Rotulada: incluye VT", help=gl.ayuda("tir_vt"))
+k[2].metric("TIR modificada (sin VT)", fmt_pct(m.mirr_sin_vt), "Reinversión al WACC", help=gl.ayuda("tirm"))
+k[3].metric("Índice de rentabilidad", f"{m.ir_sin_vt:.2f}", "VP flujos / CAPEX (sin VT)", help=gl.ayuda("ir"))
 k = st.columns(4, gap="medium")
-k[0].metric("Payback simple", f"{ve.fmt_years(m.payback)} años", "Indicador secundario",
-    help="Años para recuperar la inversión con flujos sin descontar. Ignora el valor del dinero en el tiempo y los flujos posteriores.")
-k[1].metric("Payback descontado", f"{ve.fmt_years(m.payback_disc)} años", "Al WACC",
-    help="Igual que el payback simple, pero descontando los flujos al WACC.")
-k[2].metric("Valor anual equivalente", fmt_money_short(m.eaa), "EAA del VAN",
-    help="VAN convertido en anualidad. Permite comparar proyectos mutuamente excluyentes con horizontes distintos.")
+k[0].metric("Payback simple", f"{ve.fmt_years(m.payback)} años", "Indicador secundario", help=gl.ayuda("payback"))
+k[1].metric("Payback descontado", f"{ve.fmt_years(m.payback_disc)} años", "Al WACC", help=gl.ayuda("payback_disc"))
+k[2].metric("Valor anual equivalente", fmt_money_short(m.eaa), "EAA del VAN", help=gl.ayuda("eaa"))
 k[3].metric("WACC (tasa usada)", ve.fmt_rate(m.wacc), f"Ke {ve.fmt_rate(wb.ke_flow)} · Kd {ve.fmt_rate(wb.kd_pre)}",
-    help="Tasa de descuento en la moneda del flujo, con la precisión con la que se usa en el cálculo.")
+            help=gl.ayuda("wacc"))
 if ev.mc is not None:
     s = ev.mc.stats
     k = st.columns(4, gap="medium")
-    k[0].metric("P(VAN<0)", fmt_pct(s["prob_neg"], 1), "Monte Carlo",
-        help="Probabilidad de VAN negativo bajo los rangos de drivers elegidos. No reemplaza al escenario pesimista.")
+    k[0].metric("P(VAN<0)", fmt_pct(s["prob_neg"], 1), "Monte Carlo", help=gl.ayuda("p_neg"))
     k[1].metric("P50 (VAN)", fmt_money_short(s["p50"]), f"Caso base en P{s['base_percentile'] * 100:.0f}",
-        help="Mediana de la distribución. Si el caso base está lejos del centro, los rangos son asimétricos.")
-    k[2].metric("CVaR5", fmt_money_short(s["cvar5"]), "Promedio del 5 % peor",
-        help="Severidad media del 5 % de escenarios más desfavorables.")
-    k[3].metric("VAN pesimista", fmt_money_short(ev.pess_van_main), "Determinístico",
-        help="VAN con todos los drivers en su lado adverso a la vez.")
+                help=gl.ayuda("p50") + "\n\n---\n\n" + gl.ayuda("p5") + "\n\n---\n\n" + gl.ayuda("base_pct"))
+    k[2].metric("CVaR5", fmt_money_short(s["cvar5"]), "Promedio del 5 % peor", help=gl.ayuda("cvar5"))
+    k[3].metric("VAN pesimista", fmt_money_short(ev.pess_van_main), "Determinístico", help=gl.ayuda("van_pess"))
 
 st.markdown("")
 
 # ── WACC y variable crítica ──────────────────────────────────────────────────
-cA, cB = st.columns(2, gap="large")
+cA, cB = st.container(), st.container()
 with cA:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"### 🧮 Tasa de descuento en {wb.rate_currency}")
-    rows = [("Rf (USD)", ve.fmt_rate(wb.rf)), ("β desapalancada → apalancada", f"{wb.beta_u:.3f} → {wb.beta_l:.3f}"),
-            ("ERP", ve.fmt_rate(wb.erp)), ("CRP", ve.fmt_rate(wb.crp)), ("Prima por tamaño", ve.fmt_rate(wb.size_premium)),
-            ("Ke en USD", ve.fmt_rate(wb.ke_usd)), (f"π {wb.flow_currency} / π USD", f"{fmt_pct(wb.infl_flow)} / {fmt_pct(wb.infl_usd)}"),
-            (f"Ke en {wb.flow_currency}", ve.fmt_rate(wb.ke_flow)),
-            ("Kd antes / después de IRE", f"{ve.fmt_rate(wb.kd_pre)} / {ve.fmt_rate(wb.kd_post)}"),
-            ("Pesos E/V · D/V", f"{fmt_pct(wb.wE)} · {fmt_pct(wb.wD)}"), ("WACC", ve.fmt_rate(wb.wacc))]
-    st.dataframe({"Componente": [r_[0] for r_ in rows], "Valor": [r_[1] for r_ in rows]}, hide_index=True, width="stretch")
+    st.caption("Ke en USD (CAPM) → Ke en la moneda del flujo (diferencial de inflación) → WACC ponderado con la estructura objetivo, con el Kd después de IRE.")
+    wacc_rows = [
+        ("rf", "Rf (USD)", ve.fmt_rate(wb.rf)),
+        ("beta_u", "β desapalancada (βU)", f"{wb.beta_u:.3f}"),
+        ("beta_l", "β apalancada (βL)", f"{wb.beta_l:.3f}"),
+        ("erp", "ERP", ve.fmt_rate(wb.erp)),
+        ("crp", "CRP (riesgo país)", ve.fmt_rate(wb.crp)),
+        ("size", "Prima por tamaño", ve.fmt_rate(wb.size_premium)),
+        ("ke_usd", "Ke en USD", ve.fmt_rate(wb.ke_usd)),
+        ("pi", f"π {wb.flow_currency} / π USD", f"{fmt_pct(wb.infl_flow)} / {fmt_pct(wb.infl_usd)}"),
+        ("ke_flow", f"Ke en {wb.flow_currency}", ve.fmt_rate(wb.ke_flow)),
+        ("kd", "Kd antes / después de IRE", f"{ve.fmt_rate(wb.kd_pre)} / {ve.fmt_rate(wb.kd_post)}"),
+        ("weights", "Pesos E/V · D/V", f"{fmt_pct(wb.wE)} · {fmt_pct(wb.wD)}"),
+        ("wacc", "WACC", ve.fmt_rate(wb.wacc)),
+    ]
+    st.markdown(edu_table(["Componente", "Valor", "Qué es, cómo se calcula y cómo leerlo"],
+                          [[lab, val, gl.celda_html(k_)] for k_, lab, val in wacc_rows]), unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 with cB:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 🎯 Punto de equilibrio (VAN = 0)")
     st.caption("Valor de cada variable que anula el VAN, manteniendo las demás constantes. La variable crítica es la más frágil.")
-    be_rows = {"Variable": [], "Base": [], "Valor límite": [], "Cambio": []}
-    for b in ev.breakevens:
-        be_rows["Variable"].append(b.label + (" ◄" if ev.critical is not None and b.driver == ev.critical.driver else ""))
-        if b.unit == "money":
-            be_rows["Base"].append(fmt_money(b.base_value))
-            be_rows["Valor límite"].append("—" if b.limit_value is None else fmt_money(b.limit_value))
-        elif b.unit == "pct":
-            be_rows["Base"].append(fmt_pct(b.base_value))
-            be_rows["Valor límite"].append("—" if b.limit_value is None else fmt_pct(b.limit_value))
+    be_html = []
+    for b_ in ev.breakevens:
+        if b_.unit == "money":
+            base_t, lim_t = fmt_money(b_.base_value), ("—" if b_.limit_value is None else fmt_money(b_.limit_value))
+        elif b_.unit == "pct":
+            base_t, lim_t = fmt_pct(b_.base_value), ("—" if b_.limit_value is None else fmt_pct(b_.limit_value))
         else:
-            be_rows["Base"].append("100%")
-            be_rows["Valor límite"].append("—" if b.limit_value is None else f"{b.limit_value * 100:.1f}%")
-        be_rows["Cambio"].append("—" if b.rel_change is None else f"{b.rel_change * 100:+.1f}%")
-    st.dataframe(be_rows, hide_index=True, width="stretch")
+            base_t, lim_t = "100%", ("—" if b_.limit_value is None else f"{b_.limit_value * 100:.1f}%")
+        chg_t = "—" if b_.rel_change is None else f"{b_.rel_change * 100:+.1f}%"
+        crit_t = " ◄ crítica" if ev.critical is not None and b_.driver == ev.critical.driver else ""
+        be_html.append([b_.label + crit_t, base_t, lim_t, chg_t, gl.celda_html(gl.BE_KEYS[b_.driver])])
+    st.markdown(edu_table(["Variable", "Base", "Valor límite", "Cambio", "Qué significa y cómo leerlo"], be_html),
+                unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("")
@@ -482,6 +521,7 @@ pv_term = ve.pv_terminal(val)
 with cC:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 🏗️ Estructura del valor")
+    st.caption("VAN = valor presente de los flujos del horizonte + valor de cierre (según el tratamiento elegido) − CAPEX inicial.")
     term_name = {"none": "Recupero\ncapital de trabajo", "salvage": "Desecho +\nrecupero CT", "perpetuity": "VT\n(perpetuidad)"}[m.mode]
     fig = go.Figure(go.Waterfall(
         orientation="v", measure=["relative", "relative", "relative", "total"],
@@ -500,6 +540,7 @@ with cC:
 with cD:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 📈 Flujo de caja libre (FCF)")
+    st.caption("Barras: FCF de cada año (verde positivo, rojo negativo). Línea punteada: valor presente acumulado de esos flujos al WACC.")
     f_ops = flw.fcf_ops[0]
     yrs = flw.years
     cum_pv = np.cumsum(f_ops / (1 + wb.wacc) ** yrs)
@@ -516,6 +557,7 @@ with cD:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with st.expander("🔎 Detalle del flujo de caja (puente EBITDA → FCF)", expanded=False):
+    st.caption("Año por año: el IRE se calcula solo si el EBIT es positivo; la depreciación se suma de vuelta porque no es caja; la reposición mantiene el negocio y el capital de trabajo crece con las ventas.")
     lines = [("Ingresos", flw.revenue[0]), ("− Costos variables", -flw.var_cost[0]), ("− Costos fijos", -flw.fixed_cost[0]),
              ("= EBITDA", flw.ebitda[0]), ("− Depreciación", -flw.dep[0]), ("= EBIT", flw.ebit[0]),
              ("− IRE (solo si EBIT > 0)", -flw.tax[0]), ("+ Depreciación", flw.dep[0]),
@@ -524,11 +566,19 @@ with st.expander("🔎 Detalle del flujo de caja (puente EBITDA → FCF)", expan
     for j, y_ in enumerate(yrs):
         tbl[f"Año {y_}"] = [fmt_money(v[j]) for _, v in lines]
     st.dataframe(tbl, hide_index=True, width="stretch")
+    st.markdown("**¿Qué significa cada línea?**")
+    _lineas = [("Ingresos", "ingresos"), ("− Costos variables", "costos_var"), ("− Costos fijos", "costos_fijos"),
+               ("= EBITDA", "ebitda"), ("− Depreciación", "dep"), ("= EBIT", "ebit"), ("− IRE (solo si EBIT > 0)", "ire_row"),
+               ("+ Depreciación", "dep_back"), ("− Δ capital de trabajo", "dnwc"), ("− CAPEX de reposición", "capex_repl"),
+               ("= FCF", "fcf")]
+    st.markdown(edu_table(["Línea", "Qué es, fórmula y cómo leerla"], [[n_, gl.celda_html(k_)] for n_, k_ in _lineas]),
+                unsafe_allow_html=True)
 
 # ── Monte Carlo ──────────────────────────────────────────────────────────────
 if ev.mc is not None:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 🎲 Riesgo — Monte Carlo sobre drivers operativos")
+    st.caption("Histograma del VAN en miles de escenarios. P5 = adverso plausible, P50 = central, P95 = favorable, CVaR5 = promedio del 5 % peor. Línea verde: caso base; amarilla: escenario pesimista.")
     s = ev.mc.stats
     st.markdown(f"<div class='small'>Sims: <b>{s['n']:,}</b> · distribución: <b>{dist}</b> · P(VAN&lt;0): <b>{fmt_pct(s['prob_neg'], 1)}</b> · "
                 f"P5: <b>{fmt_money_short(s['p5'])}</b> · P50: <b>{fmt_money_short(s['p50'])}</b> · P95: <b>{fmt_money_short(s['p95'])}</b> · "
@@ -556,6 +606,14 @@ st.divider()
 # ── Sensibilidad WACC × g ────────────────────────────────────────────────────
 st.header("🔍 Análisis de sensibilidad — WACC × g de ventas")
 st.caption(f"VAN ({mode_txt}) recalculado variando WACC (filas) y g de ventas (columnas). Verde = VAN > 0 · Rojo = VAN < 0 · Borde azul = caso base.")
+with st.expander("ℹ️ ¿Cómo leer esta tabla?", expanded=False):
+    st.markdown("""
+**Filas = WACC** (costo de capital): si sube, el VAN baja. **Columnas = g de ventas**: si el negocio crece más, el VAN sube.
+
+- 🟢 **Verde**: el proyecto crea valor con esa combinación. 🔴 **Rojo**: lo destruye.
+- **Borde azul** = tu caso base (valores actuales de la barra lateral).
+- **Regla práctica**: si la mayoría de las celdas son verdes, el resultado es robusto frente a esos dos supuestos.
+""")
 WACC_D = [-0.030, -0.015, 0.0, 0.015, 0.030]
 G_D = [-0.020, -0.010, 0.0, 0.010, 0.020]
 sens = []
@@ -586,22 +644,30 @@ st.divider()
 
 # ── Comparador de escenarios ─────────────────────────────────────────────────
 st.header("🧪 Comparar escenarios")
+st.caption("Guardá el escenario actual, cambiá los datos y volvé a guardar para compararlos lado a lado. Si los horizontes difieren, compará por valor anual equivalente.")
 if "scenarios" not in st.session_state:
     st.session_state["scenarios"] = []
 wacc_key = (CURRENCY, rf, erp, crp, size_prem, beta_u, tax_rate, pi_flow, pi_usd, convert, float(debt), float(equity_bk), kd)
 cc1, cc2, cc3 = st.columns([0.5, 0.25, 0.25], gap="medium")
-sc_name = cc1.text_input("Nombre del escenario", f"Escenario {len(st.session_state['scenarios']) + 1}", label_visibility="collapsed")
-if cc2.button("Guardar este escenario", width="stretch"):
+sc_name = cc1.text_input("Nombre del escenario", f"Escenario {len(st.session_state['scenarios']) + 1}", label_visibility="collapsed",
+                         help="Nombre con el que se guardará el escenario actual para compararlo con otros (por ejemplo, «Optimista» o «5 años»).")
+if cc2.button("Guardar este escenario", width="stretch",
+              help="Guarda los resultados actuales (VAN, TIR, WACC, valor anual equivalente) en la tabla de abajo. Cambiá los datos y volvé a guardar para comparar."):
     st.session_state["scenarios"].append(dict(name=sc_name, n_years=n_years, wacc=m.wacc, wacc_key=wacc_key, van=m.van_main,
                                               irr=m.irr_sin_vt, eaa=m.eaa, pneg=ev.mc.stats["prob_neg"] if ev.mc else float("nan")))
-if cc3.button("Borrar escenarios", width="stretch"):
+if cc3.button("Borrar escenarios", width="stretch", help="Vacía la tabla de escenarios guardados."):
     st.session_state["scenarios"] = []
 sc = st.session_state["scenarios"]
 if sc:
     st.dataframe({"Escenario": [r_["name"] for r_ in sc], "Horizonte": [r_["n_years"] for r_ in sc],
                   "WACC": [ve.fmt_rate(r_["wacc"]) for r_ in sc], f"VAN ({CURRENCY})": [fmt_money(r_["van"]) for r_ in sc],
                   "TIR sin VT": [fmt_pct(r_["irr"]) for r_ in sc], "Valor anual equivalente": [fmt_money(r_["eaa"]) for r_ in sc],
-                  "P(VAN<0)": [fmt_pct(r_["pneg"], 1) for r_ in sc]}, hide_index=True, width="stretch")
+                  "P(VAN<0)": [fmt_pct(r_["pneg"], 1) for r_ in sc]}, hide_index=True, width="stretch",
+                 column_config={"WACC": st.column_config.TextColumn("WACC", help=gl.ayuda("wacc")),
+                                f"VAN ({CURRENCY})": st.column_config.TextColumn(f"VAN ({CURRENCY})", help=gl.ayuda("van")),
+                                "TIR sin VT": st.column_config.TextColumn("TIR sin VT", help=gl.ayuda("tir")),
+                                "Valor anual equivalente": st.column_config.TextColumn("Valor anual equivalente", help=gl.ayuda("eaa")),
+                                "P(VAN<0)": st.column_config.TextColumn("P(VAN<0)", help=gl.ayuda("p_neg"))})
     for a in ve.compare_scenarios(sc):
         (st.error if a.severity == "alta" else st.warning)(f"**{a.code} · {a.title}.** {a.detail}")
 else:
@@ -609,8 +675,24 @@ else:
 
 st.divider()
 
+# ── Glosario académico ───────────────────────────────────────────────────────
+with st.expander("📚 Glosario académico — conceptos y fórmulas de esta calculadora", expanded=False):
+    st.caption("Material de estudio: cada concepto con su definición, su fórmula, cómo interpretarlo y su base teórica.")
+    _grupos = [
+        ("Costo del capital (WACC)", ["rf", "beta_u", "beta_l", "erp", "crp", "size", "ke_usd", "pi", "ke_flow", "kd", "weights", "wacc", "ire"]),
+        ("Flujo de caja libre", ["ingresos", "costos_var", "costos_fijos", "ebitda", "dep", "ebit", "ire_row", "dnwc", "capex_repl", "fcf"]),
+        ("Criterios de decisión", ["van", "van_sin_vt", "van_con_vt", "vt_weight", "tir", "tir_vt", "tirm", "ir", "payback", "payback_disc", "eaa"]),
+        ("Riesgo", ["p_neg", "p50", "p5", "cvar5", "van_pess", "base_pct"]),
+        ("Punto de equilibrio", ["be_price", "be_volume", "be_unit_vc", "be_fixed", "be_capex", "be_wacc"]),
+    ]
+    for _titulo, _keys in _grupos:
+        st.markdown(f"**{_titulo}**")
+        st.markdown(edu_table(["Concepto", "Definición, fórmula y cómo leerlo"], [[gl.G[k_]["nombre"], gl.celda_html(k_)] for k_ in _keys]),
+                    unsafe_allow_html=True)
+
 # ── Export ───────────────────────────────────────────────────────────────────
 st.header("📥 Export")
+st.caption("Descargá el resumen de una página con indicadores, desglose de la tasa, alertas, escenario pesimista y la sección de supuestos y limitaciones.")
 onepager = rep.OnePager(
     ev=ev, currency=CURRENCY, institution="Universidad San Ignacio de Loyola (USIL)",
     program="Maestría en Administración de Negocios (MBA)", course="Proyectos de Inversión / Valuation",

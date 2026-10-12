@@ -6,6 +6,7 @@ from dataclasses import replace
 import numpy as np
 
 import fixtures as fx
+import glosario as gl
 import report_usil as rep
 import valuation_engine as ve
 
@@ -429,6 +430,44 @@ class TestReporte(unittest.TestCase):
         op, ev = self._op()
         self.assertIn("VAN = 0", rep.describe_break(ev.critical, "PYG"))
         self.assertIn("No se encontró", rep.describe_break(None, "PYG"))
+
+
+class TestGlosario(unittest.TestCase):
+    """Propósito principal de la calculadora: enseñar. Todo concepto lleva su explicación académica."""
+
+    def test_cada_concepto_tiene_las_cuatro_partes(self):
+        for k, g in gl.G.items():
+            for campo in ("nombre", "que", "formula", "lectura", "base"):
+                self.assertTrue(g.get(campo, "").strip(), f"{k}.{campo} vacío")
+            self.assertGreaterEqual(len(g["que"]), 40, k)
+            self.assertGreaterEqual(len(g["lectura"]), 40, k)
+
+    def test_cubre_cada_componente_de_la_tasa_y_cada_driver(self):
+        for k in ("rf", "beta_u", "beta_l", "erp", "crp", "size", "ke_usd", "pi", "ke_flow", "kd", "weights", "wacc", "ire"):
+            self.assertIn(k, gl.G)
+        for d in ve.DRIVERS:
+            self.assertIn(gl.BE_KEYS[d], gl.G)
+
+    def test_formulas_clave_son_las_que_calcula_el_motor(self):
+        self.assertIn("(1 + Ke_USD) · (1 + π_flujo) / (1 + π_USD) − 1", gl.G["ke_flow"]["formula"])
+        self.assertIn("(1 − T)", gl.G["kd"]["formula"])
+        self.assertIn("E/V · Ke + D/V · Kd · (1 − T)", gl.G["wacc"]["formula"])
+        self.assertIn("1 + (1 − T) · D/E", gl.G["beta_l"]["formula"])
+        self.assertIn("WACC − g∞", gl.G["van_con_vt"]["formula"])
+
+    def test_txt_incluye_el_glosario(self):
+        ev = ve.evaluate(proj_demo(), ve.wacc_from_reported(0.10), ve.MCSpec(sims=1000, seed=1))
+        op = rep.OnePager(ev=ev, currency="PYG", institution="U", program="P", course="C", project="x", responsible="y",
+                          programa="z", integrantes="", report_date="d")
+        t = rep.build_onepager_text(op)
+        self.assertIn("GLOSARIO", t)
+        for k in ("wacc", "ke_flow", "van", "tir"):
+            self.assertIn(gl.G[k]["nombre"], t)
+            self.assertIn(gl.G[k]["formula"], t)
+
+    def test_celda_html_escapa_y_ayuda_tiene_formato(self):
+        self.assertIn("&lt;", gl.celda_html("p_neg"))
+        self.assertIn("**Fórmula:**", gl.ayuda("wacc"))
 
 
 if __name__ == "__main__":

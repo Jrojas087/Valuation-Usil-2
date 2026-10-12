@@ -31,6 +31,8 @@ Los casos: F1 FrioLog, F2 Smart Recovery, F3 Pantalla RH, F4 Ovos Terra, F5 Huma
 | 10 | *(Hallazgo propio)* El Monte Carlo no tenía semilla: dos corridas del mismo proyecto daban resultados distintos (F2 tiene dos). | Semilla fija opcional; mismo resultado = mismo reporte. | `MCSpec.seed` |
 | 11 | *(Hallazgo propio)* La demo por defecto tenía EBIT negativo y D+E ≠ CAPEX. | Demo reequilibrada (EBIT positivo, D+E = CAPEX). Etiqueta «IRACIS» (derogada) → IRE. | `app.py` |
 
+**Enfoque didáctico.** El propósito principal de la calculadora es enseñar: cada componente de la tasa (Rf, βU, βL, ERP, CRP, prima por tamaño, Ke en USD, π Gs / π USD, Ke en la moneda del flujo, Kd, pesos, WACC), cada línea del flujo, cada fila del punto de equilibrio y cada indicador muestra su definición, su fórmula, cómo interpretarlo y su base teórica (`glosario.py`). Hay además un glosario completo dentro de la app.
+
 ## 3. Lectura con criterios CFA (presupuesto de capital y valoración)
 
 Contraste de la calculadora con los principios habituales del currículo CFA. Es una lectura de principios, **no una auditoría ni una certificación del CFA Institute**; conviene validar los umbrales contra el material vigente.
@@ -61,7 +63,7 @@ Contraste de la calculadora con los principios habituales del currículo CFA. Es
 ## 5. Cómo verificar
 
 ```bash
-python -m unittest -v          # 51 pruebas del motor + 7 de la interfaz
+python -m unittest -v          # 56 pruebas del motor + 14 de la interfaz
 python backtest.py             # regenera INFORME_BACKTEST.md
 streamlit run app.py
 ```

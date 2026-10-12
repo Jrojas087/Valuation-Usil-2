@@ -7,9 +7,14 @@ Respuesta a los defectos D1–D8 detectados con los 5 casos (ver `MEJORAS_CALCUL
 - `valuation_engine.py`: motor sin Streamlit (flujo desagregado, WACC en la moneda del flujo, VT opcional, Monte Carlo sobre drivers,
   punto de equilibrio, 17 alertas, EAA, TIRM, índice de rentabilidad). Incluye el **modo compatibilidad** (`legacy_*`) con las fórmulas v2.0.
 - `fixtures.py` (casos F1–F5 y benchmark, sin modificar), `backtest.py` (genera `INFORME_BACKTEST.md`).
-- `test_engine.py` (51 pruebas: T1–T6, C1–C8, criterios CFA, reportes) y `test_app.py` (7 pruebas de interfaz con `AppTest`).
+- `test_engine.py` (56 pruebas: T1–T6, C1–C8, criterios CFA, reportes, glosario) y `test_app.py` (14 pruebas de interfaz con `AppTest`,
+  incluida la verificación de que cada campo, indicador y tabla trae su explicación académica).
 - Comparador de escenarios con alerta de horizontes distintos y valor anual equivalente.
 - Sección «Supuestos y limitaciones» en el TXT y el PDF.
+
+- `glosario.py`: **explicación académica de cada concepto** (qué es, fórmula, cómo leerlo y base teórica). Alimenta las tablas de la tasa de
+  descuento, del punto de equilibrio y del puente EBITDA → FCF, los tooltips de campos e indicadores, un glosario consultable dentro de la
+  app y una sección de glosario en el TXT del one-pager. El propósito principal de la calculadora es enseñar.
 
 ### Cambiado
 - Valor terminal: **desactivado por defecto**; VAN y TIR se muestran siempre con y sin VT, con el peso del VT.

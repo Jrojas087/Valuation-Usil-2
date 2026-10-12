@@ -9,6 +9,7 @@ import textwrap
 from dataclasses import dataclass
 from typing import Optional
 
+import glosario as gl
 import valuation_engine as ve
 
 REPORTLAB_OK = True
@@ -204,6 +205,14 @@ def build_onepager_text(r: OnePager) -> str:
     else:
         L.append("- Sin alertas activas.")
     L += ["", "SUPUESTOS Y LIMITACIONES", *[f"- {d}" for d in DISCLOSURE]]
+    L += ["", "GLOSARIO (material de estudio)"]
+    claves = ["rf", "beta_u", "beta_l", "erp", "crp", "size", "ke_usd", "pi", "ke_flow", "kd", "weights", "wacc",
+              "fcf", "van", "van_sin_vt", "van_con_vt", "vt_weight", "tir", "tirm", "ir", "payback", "eaa",
+              "p_neg", "cvar5", "van_pess"]
+    for k in claves:
+        g = gl.get(k)
+        L += [f"* {g['nombre']}", f"    Qué es: {g['que']}", f"    Fórmula: {g['formula']}",
+              f"    Cómo leerlo: {g['lectura']}", f"    Base teórica: {g['base']}"]
     return "\n".join(L)
 
 
