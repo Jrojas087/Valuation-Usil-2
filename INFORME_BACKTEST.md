@@ -181,7 +181,7 @@ Humanitas se reproduzca con la v2.0: falta información. Un g∞ negativo es lla
 | Posición del caso base en la distribución | no se informaba | 81,2% | — | C4 |
 | VAN escenario pesimista determinístico | no existía | 989.774.867 | — | C4 |
 | Variable crítica (VAN = 0) | no existía | FCF (nivel): -70,7% | — | C8 |
-| Lectura | DICTAMEN: APROBADO (VAN>0, P(VAN<0)≤20 %, P5>0) | Indicadores favorables bajo los supuestos cargados | — | D8 |
+| Lectura | DICTAMEN: APROBADO (VAN>0, P(VAN<0)≤20 %, P5>0) | Indicadores favorables con reservas bajo los supuestos cargados | — | D8 |
 | Alertas activas | ninguna | V01, V02, V03, V04 | — | D6 |
 
 ### F2 — Smart Recovery (suplemento) (valores en Gs)
@@ -202,7 +202,7 @@ Humanitas se reproduzca con la v2.0: falta información. Un g∞ negativo es lla
 | Posición del caso base en la distribución | no se informaba | 81,8% | — | C4 |
 | VAN escenario pesimista determinístico | no existía | 10.261.413 | — | C4 |
 | Variable crítica (VAN = 0) | no existía | FCF (nivel): -66,1% | — | C8 |
-| Lectura | DICTAMEN: APROBADO (VAN>0, P(VAN<0)≤20 %, P5>0) | Indicadores favorables bajo los supuestos cargados | — | D8 |
+| Lectura | DICTAMEN: APROBADO (VAN>0, P(VAN<0)≤20 %, P5>0) | Indicadores favorables con reservas bajo los supuestos cargados | — | D8 |
 | Alertas activas | ninguna | V01, V02, V03, V04, V05, V06 | — | D6 |
 
 ### F3 — Pantalla icónica RH (pantalla LED publicitaria) (valores en USD @7.000)

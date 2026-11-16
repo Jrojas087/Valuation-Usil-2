@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import numpy_financial as npf
 
-ENGINE_VERSION = "3.0"
+ENGINE_VERSION = "3.1"
 MIN_SPREAD = 0.005          # solo modo compatibilidad: WACC > g∞ + 0,5 pp
 G_INF_MARGIN = 0.02         # C4: g∞ ≤ WACC − 2 pp (modo corregido)
 
@@ -37,6 +37,7 @@ THRESHOLDS = dict(
     fcf_ebit_min=0.30,           # FCF/EBIT razonable: [0,30 ; 1,50]
     fcf_ebit_max=1.50,
     prob_neg_ok=0.20,
+    leverage_max=0.80,           # D/V > 80 %: apalancamiento extremo
 )
 
 DRIVERS = ("price", "volume", "unit_vc", "fixed", "capex", "wacc")
@@ -114,6 +115,23 @@ def legacy_payback(capex0: float, flows: Sequence[float], wacc: Optional[float] 
         if cum >= 0:
             return float(i - 1 + ((0 - prev) / v if v != 0 else 0.0))
     return None
+
+
+def payback_period(capex0: float, flows: Sequence[float], wacc: Optional[float] = None) -> Optional[float]:
+    """Payback (simple o descontado) como el ÚLTIMO cruce del acumulado a no negativo.
+    Si el acumulado vuelve a caer después de un primer cruce, ese primer cruce no cuenta; si el acumulado
+    termina negativo, la inversión no se recupera (None). Con flujos convencionales coincide con legacy_payback."""
+    cum, prev_cum, last = -float(capex0), -float(capex0), None
+    if cum >= 0:
+        last = 0.0
+    for i, f in enumerate(flows, 1):
+        v = float(f) if wacc is None else float(f) / (1 + wacc) ** i
+        prev_cum, cum = cum, cum + v
+        if prev_cum < 0 <= cum:
+            last = float(i - 1 + (0 - prev_cum) / v)
+        elif cum < 0:
+            last = None
+    return last if cum >= 0 else None
 
 
 def legacy_fcf1(sales: float, cvar: float, cfix: float, dep: float, capex_y1: float,
@@ -252,6 +270,12 @@ class WaccBreakdown:
 
 def wacc_breakdown(w: WaccInputs) -> WaccBreakdown:
     """Ke_flow = (1+Ke_USD)(1+π_flow)/(1+π_USD) − 1 ; Kd después de IRE ; pesos E/V y D/V explícitos."""
+    if not (0.0 <= w.tax < 1.0):
+        raise ValueError(f"La tasa de IRE debe estar entre 0 % y 100 % (se recibió {w.tax * 100:.2f} %).")
+    if w.infl_usd <= -1.0 or w.infl_flow <= -1.0:
+        raise ValueError("La inflación no puede ser ≤ −100 %.")
+    if w.debt < 0 or w.equity < 0 or (w.debt + w.equity) <= 0:
+        raise ValueError("Deuda y capital propio no pueden ser negativos y su suma debe ser positiva.")
     V = max(w.debt + w.equity, 1e-9)
     wD, wE = w.debt / V, w.equity / V
     beta_l = w.beta_u * (1 + (1 - w.tax) * (w.debt / max(w.equity, 1e-9)))
@@ -311,6 +335,13 @@ class Project:
     dep_years: int = 10               # vida contable (línea recta)
     maint_capex_pct: float = 1.0      # reposición anual = % × depreciación de la base inicial (≥ 100 %)
     infl_capex: float = 0.0           # indexación del CAPEX de reposición
+    # Reposición anual como fracción del CAPEX inicial (a precios del Año 1). Si se informa, REEMPLAZA a
+    # maint_capex_pct: la caja de reposición deja de depender de la vida contable.
+    maint_capex_of_capex: Optional[float] = None
+    repl_final_year: bool = True      # False: sin reposición en el año N si el proyecto termina (none / salvage)
+    loss_carryforward: bool = False   # arrastre de pérdidas fiscales
+    loss_cf_years: int = 5            # años durante los que se puede compensar una pérdida
+    loss_cf_cap: float = 0.20         # tope de compensación: fracción de la renta neta de cada año
     nwc_y1: float = 0.0               # capital de trabajo (AR+INV−AP) al cierre del Año 1, a plena capacidad
     recover_nwc: bool = True          # se recupera al final si el proyecto termina
     salvage_value: float = 0.0        # valor de desecho BRUTO en el año N
@@ -350,12 +381,15 @@ class Flows:
     salvage_net: np.ndarray        # (S,) desecho neto de IRE
     book_end: np.ndarray           # (S,) valor libro al año N
     tax_rate: float
+    repl_steady: Optional[np.ndarray] = None   # (S,) reposición del año N en régimen (aunque no se ejecute)
+    loss_used: Optional[np.ndarray] = None     # (S, N) pérdidas de años anteriores compensadas cada año
 
     def norm_fcf(self, g) -> np.ndarray:
         """FCF normalizado del año N+1 (C1-iii): reinversión ≥ depreciación (estado estacionario)."""
         g = np.asarray(g, float)
         eb = self.ebitda[:, -1] * (1 + g)
-        capex_n = np.maximum(self.capex_repl[:, -1], self.dep[:, -1]) * (1 + g)
+        repl_n = self.capex_repl[:, -1] if self.repl_steady is None else self.repl_steady
+        capex_n = np.maximum(repl_n, self.dep[:, -1]) * (1 + g)
         tax_n = self.tax_rate * np.maximum(eb - capex_n, 0.0)
         return eb - tax_n - capex_n - self.nwc_end * g
 
@@ -380,6 +414,9 @@ def project_flows(p: Project, price_m=1.0, vol_m=1.0, vc_m=1.0, fix_m=1.0, capex
                      capex0=capex0, nwc_end=np.zeros(S), salvage_net=np.zeros(S),
                      book_end=np.zeros(S), tax_rate=0.0)
 
+    if p.revenue_y1 <= 0 and (p.var_cost_y1 != 0 or p.nwc_y1 != 0):
+        raise ValueError("Con ventas del Año 1 = 0 no se pueden proyectar costos variables ni capital de trabajo "
+                         "(ambos se calculan como proporción de las ventas). Cargá las ventas o dejá esos campos en 0.")
     g_fix = p.g_revenue if p.g_fixed is None else p.g_fixed
     k = int(p.ramp_years)
     ramp = np.ones(N) if k <= 0 else np.minimum(1.0, p.ramp_start + (1 - p.ramp_start) * (t - 1) / k)
@@ -393,7 +430,11 @@ def project_flows(p: Project, price_m=1.0, vol_m=1.0, vc_m=1.0, fix_m=1.0, capex
     # Depreciación línea recta de la base inicial y de cada reposición (desde el año siguiente).
     L = max(int(p.dep_years), 1)
     base = capex0 / L
-    repl = p.maint_capex_pct * base[:, None] * (1 + p.infl_capex) ** (t - 1)[None, :]
+    repl_y1 = p.maint_capex_pct * base if p.maint_capex_of_capex is None else p.maint_capex_of_capex * capex0
+    repl = repl_y1[:, None] * (1 + p.infl_capex) ** (t - 1)[None, :]
+    repl_steady = repl[:, -1].copy()
+    if not p.repl_final_year and p.effective_mode() != "perpetuity":
+        repl[:, -1] = 0.0                                       # el proyecto termina: no se repone en el año N
     dep = np.zeros((S, N))
     for ti in range(1, N + 1):
         if ti <= L:
@@ -403,18 +444,32 @@ def project_flows(p: Project, price_m=1.0, vol_m=1.0, vc_m=1.0, fix_m=1.0, capex
             dep[:, ti - 1] += repl[:, si - 1] / L
 
     ebit = ebitda - dep
-    tax = p.tax * np.maximum(ebit, 0.0)                         # IRE solo si EBIT > 0
+    loss_used = np.zeros((S, N))
+    if p.loss_carryforward:
+        # Las pérdidas se compensan (las más antiguas primero) durante loss_cf_years, con tope loss_cf_cap
+        # sobre la renta neta de cada año.
+        bucket = np.maximum(-ebit, 0.0)                         # pérdida generada en cada año, aún sin usar
+        for ti in range(N):
+            room = p.loss_cf_cap * np.maximum(ebit[:, ti], 0.0)
+            for oi in range(max(0, ti - int(p.loss_cf_years)), ti):
+                use = np.minimum(bucket[:, oi], room)
+                bucket[:, oi] -= use
+                room = room - use
+                loss_used[:, ti] += use
+    tax = p.tax * np.maximum(ebit - loss_used, 0.0)             # IRE solo sobre renta neta positiva
     nwc_ratio = p.nwc_y1 / p.revenue_y1 if p.revenue_y1 else 0.0
     nwc = nwc_ratio * revenue
     d_nwc = np.diff(np.concatenate([np.zeros((S, 1)), nwc], axis=1), axis=1)
     fcf = ebitda - tax - d_nwc - repl
 
     book_end = capex0 + repl.sum(1) - dep.sum(1)
-    gain = np.maximum(p.salvage_value - book_end, 0.0)
-    salvage_net = p.salvage_value - p.tax * gain
+    # Simétrico: la ganancia sobre el valor libro paga IRE y la pérdida genera escudo fiscal (supone que
+    # la empresa tiene otra renta gravada contra la cual deducirla).
+    salvage_net = p.salvage_value - p.tax * (p.salvage_value - book_end)
     return Flows(years=t, revenue=revenue, var_cost=var_cost, fixed_cost=fixed, ebitda=ebitda, dep=dep,
                  ebit=ebit, tax=tax, d_nwc=d_nwc, capex_repl=repl, fcf_ops=fcf, capex0=capex0,
-                 nwc_end=nwc[:, -1], salvage_net=salvage_net, book_end=book_end, tax_rate=p.tax)
+                 nwc_end=nwc[:, -1], salvage_net=salvage_net, book_end=book_end, tax_rate=p.tax,
+                 repl_steady=repl_steady, loss_used=loss_used)
 
 
 @dataclass
@@ -450,12 +505,17 @@ def valuate(fl: Flows, w, p: Project) -> Valuation:
     van_salv = van_sin + pv_salv
     van_perp = pv_ops + pv_vt - fl.capex0
     van_main = {"none": van_sin, "salvage": van_salv, "perpetuity": van_perp}[mode]
+    def _weight(part, total):
+        """Porción del valor que aporta `part`. Solo tiene sentido si el total y la parte son positivos: con
+        flujos del horizonte negativos el cociente supera el 100 % (se informa 100 %) y con total ≤ 0 no existe."""
+        ok = (total > 0) & (part >= 0)
+        return np.where(ok, np.minimum(part / np.where(ok, total, 1.0), 1.0), np.nan)
+
     if mode == "salvage":
-        van_con, weight, ref = van_salv, pv_salv / np.where(pv_ops + pv_nwc + pv_salv == 0, np.nan,
-                                                            pv_ops + pv_nwc + pv_salv), False
+        van_con, weight, ref = van_salv, _weight(pv_salv, pv_ops + pv_nwc + pv_salv), False
     else:
         van_con, ref = van_perp, mode == "none"
-        weight = pv_vt / np.where(pv_ops + pv_vt == 0, np.nan, pv_ops + pv_vt)
+        weight = _weight(pv_vt, pv_ops + pv_vt)
     return Valuation(pv_ops=pv_ops, pv_nwc=pv_nwc, pv_salvage=pv_salv, pv_vt=pv_vt, vt=vt, g_eff=g_eff,
                      van_sin_vt=van_sin, van_con_vt=van_con, van_main=van_main, vt_weight=weight,
                      con_vt_is_reference=ref, mode=mode)
@@ -529,8 +589,9 @@ def _metrics(fl: Flows, val: Valuation, wacc: float, p: Project) -> Metrics:
         vt_weight=float(val.vt_weight[0]), pv_ops=float(val.pv_ops[0]), pv_vt=float(val.pv_vt[0]),
         vt=float(val.vt[0]), irr_sin_vt=_irr_or_none(sin), irr_con_vt=_irr_or_none(con),
         mirr_sin_vt=mirr(sin), mirr_con_vt=mirr(con),
-        ir_sin_vt=float(1 + val.van_sin_vt[0] / c0), ir_con_vt=float(1 + val.van_con_vt[0] / c0),
-        payback=legacy_payback(c0, sin[1:]), payback_disc=legacy_payback(c0, sin[1:], wacc), mode=mode,
+        ir_sin_vt=float(1 + val.van_sin_vt[0] / c0) if c0 > 0 else float("nan"),
+        ir_con_vt=float(1 + val.van_con_vt[0] / c0) if c0 > 0 else float("nan"),
+        payback=payback_period(c0, sin[1:]), payback_disc=payback_period(c0, sin[1:], wacc), mode=mode,
         eaa=equivalent_annual_annuity(float(val.van_main[0]), float(wacc), len(ops)),
         sign_changes=_sign_changes(sin))
 
@@ -550,6 +611,37 @@ class MCSpec:
     corr: Dict[Tuple[str, str], float] = field(default_factory=dict)   # correlaciones opcionales
     seed: Optional[int] = None
     pess_quantile: float = 0.0                   # 0 = extremos del rango; 0,10 = P10 adverso de cada driver
+
+    def validate(self) -> None:
+        """Rechaza rangos que producirían una distribución distinta de la declarada (o ninguna variación)."""
+        if int(self.sims) < 1:
+            raise ValueError("El Monte Carlo necesita al menos una simulación.")
+        if self.dist not in ("triangular", "normal"):
+            raise ValueError(f"Distribución desconocida: {self.dist!r}.")
+        if self.wacc_range < 0:
+            raise ValueError("El rango del WACC (±) no puede ser negativo.")
+        if not (0.0 <= float(self.pess_quantile) < 0.5):
+            raise ValueError("El cuantil del escenario pesimista debe estar entre 0 y 0,5.")
+        for key in DRIVERS:
+            if key == "wacc":
+                continue
+            if key not in self.ranges:
+                raise ValueError(f"Falta el rango de «{DRIVER_LABELS[key]}».")
+            lo, mo, hi = self.ranges[key]
+            lab = DRIVER_LABELS[key]
+            if lo > hi:
+                raise ValueError(f"Rango de «{lab}»: el mínimo ({(lo - 1) * 100:+.1f} %) es mayor que el máximo "
+                                 f"({(hi - 1) * 100:+.1f} %).")
+            if not (lo <= mo <= hi):
+                raise ValueError(f"Rango de «{lab}»: el caso base debe quedar dentro del rango (mínimo ≤ 0 % ≤ máximo); "
+                                 f"se recibió {(lo - 1) * 100:+.1f} % a {(hi - 1) * 100:+.1f} %.")
+            if lo < 0:
+                raise ValueError(f"Rango de «{lab}»: el mínimo no puede ser menor que −100 %.")
+        for (a, b), rho in self.corr.items():
+            if a not in DRIVERS or b not in DRIVERS or a == b:
+                raise ValueError(f"Correlación inválida entre {a!r} y {b!r}.")
+            if not (-1.0 < rho < 1.0):
+                raise ValueError("Las correlaciones deben estar entre −1 y 1 (sin incluirlos).")
 
     def pessimistic(self) -> dict:
         """Escenario pesimista determinístico: cada driver en su lado adverso, todos a la vez.
@@ -593,6 +685,7 @@ def _quantile(dist: str, u: np.ndarray, lo: float, mode: float, hi: float) -> np
 
 
 def _draw(spec: MCSpec) -> Dict[str, np.ndarray]:
+    spec.validate()
     rng = np.random.default_rng(spec.seed)
     S = int(spec.sims)
     keys = list(DRIVERS)
@@ -759,7 +852,7 @@ def run_validations(p: Project, wb: WaccBreakdown, m: Metrics, fl: Flows, mc: Op
         A.append(Alert("V09", "alta", "Perpetuidad no habilitada",
                        "Se pidió valor terminal por perpetuidad sin justificar la continuidad del negocio: "
                        "la evaluación se hizo SIN valor terminal."))
-    if m.mode == "perpetuity" and p.fcf_direct is None and p.maint_capex_pct < 1.0:
+    if m.mode == "perpetuity" and p.fcf_direct is None and fl.capex_repl[0, 0] < fl.dep[0, 0] * (1 - 1e-9):
         A.append(Alert("V10", "media", "Reposición < depreciación en la perpetuidad",
                        "El motor normaliza el CAPEX terminal al máximo entre reposición y depreciación, pero la "
                        "reposición explícita (<100 %) sobrestima los flujos de los años 1..N."))
@@ -769,10 +862,17 @@ def run_validations(p: Project, wb: WaccBreakdown, m: Metrics, fl: Flows, mc: Op
     if pess_van is not None and pess_van < 0:
         sev = "alta"
         low = mc is not None and mc.stats["prob_neg"] <= T["prob_neg_ok"]
+        q = float(mc.spec.pess_quantile) if mc is not None else 0.0
+        if q > 0:
+            tail = (f": con cada variable en su {q * 100:.0f} % más adverso a la vez, el proyecto destruye valor. "
+                    "No resiste un deterioro moderado y simultáneo de sus supuestos.")
+        elif low:
+            tail = (f", aunque P(VAN<0) del Monte Carlo es solo {mc.stats['prob_neg'] * 100:.1f}%. "
+                    "La simulación no cubre combinaciones adversas simultáneas.")
+        else:
+            tail = "."
         A.append(Alert("V11", sev, "El escenario pesimista determinístico tiene VAN negativo",
-                       f"VAN pesimista = {fmt_num(pess_van)}"
-                       + (f", aunque P(VAN<0) del Monte Carlo es solo {mc.stats['prob_neg'] * 100:.1f}%. "
-                          "La simulación no cubre combinaciones adversas simultáneas." if low else ".")))
+                       f"VAN pesimista = {fmt_num(pess_van)}" + tail))
     # ── Criterios de presupuesto de capital / valoración (lineamientos CFA) ─────────────────────────
     if m.sign_changes > 1:
         A.append(Alert("V14", "media", "Flujos no convencionales: la TIR puede no ser única",
@@ -792,6 +892,17 @@ def run_validations(p: Project, wb: WaccBreakdown, m: Metrics, fl: Flows, mc: Op
             A.append(Alert("V17", "media", "Kd por debajo de la tasa libre de riesgo",
                            f"Kd = {fmt_rate(wb.kd_pre)} < Rf en la moneda del flujo ({fmt_rate(rf_flow)}). El costo de la deuda "
                            "debe ser el rendimiento de mercado actual para esa deuda (no la tasa cupón histórica)."))
+    if (p.fcf_direct is None and m.mode != "perpetuity" and p.n_years > p.dep_years
+            and fl.capex_repl[0, 0] < fl.dep[0, 0] * (1 - 1e-9)):
+        A.append(Alert("V20", "media", "El horizonte supera la vida de los activos y la reposición no los sostiene",
+                       f"El proyecto dura {p.n_years} años, los activos {p.dep_years} y la reposición anual es menor que su "
+                       "desgaste (la depreciación). Hacia el final se estaría operando con activos agotados: subir la "
+                       "reposición o acortar el horizonte."))
+    if wb.wD > T["leverage_max"]:
+        A.append(Alert("V18", "alta", "Apalancamiento extremo (D/V > 80 %)",
+                       f"D/V = {wb.wD * 100:.1f}% y β apalancada = {wb.beta_l:.2f}. Con tan poco capital propio la fórmula de "
+                       "Hamada y un Kd constante dejan de ser válidos: el costo de la deuda debería subir con el riesgo de "
+                       "impago. Revisar la estructura objetivo."))
     if (fl.fcf_ops[0] < 0).any():
         yrs = ", ".join(str(int(y)) for y, v in zip(fl.years, fl.fcf_ops[0]) if v < 0)
         A.append(Alert("V13", "info", "FCF negativo en algún año", f"Años con FCF < 0: {yrs}."))
@@ -805,6 +916,10 @@ def compare_scenarios(rows: Sequence[dict]) -> List[Alert]:
         A.append(Alert("V08", "alta", "Horizontes distintos entre escenarios comparados",
                        "Los VAN no son comparables directamente (proyectos mutuamente excluyentes con vidas distintas): comparar el "
                        "valor anual equivalente (EAA) o igualar horizontes con cadena de reemplazo."))
+    if len({r.get("currency") for r in rows}) > 1:
+        A.append(Alert("V19", "alta", "Escenarios en monedas distintas",
+                       "Hay escenarios guardados en monedas diferentes: sus VAN y valores anuales equivalentes no se pueden "
+                       "comparar sin convertirlos a una misma moneda."))
     keys: Dict[tuple, set] = {}
     for r in rows:
         keys.setdefault(r.get("wacc_key"), set()).add(round(r["wacc"], 10))
@@ -818,7 +933,7 @@ def compare_scenarios(rows: Sequence[dict]) -> List[Alert]:
 @dataclass
 class Reading:
     """Reemplaza el 'DICTAMEN: APROBADO' (C8)."""
-    status: str            # favorable | mixto | desfavorable
+    status: str            # favorable | reservas | mixto | desfavorable
     headline: str
     detail: str
 
@@ -835,6 +950,9 @@ def read_results(m: Metrics, mc: Optional[MCResult], alerts: Sequence[Alert],
     else:
         status, head = "desfavorable", "Indicadores desfavorables bajo los supuestos cargados"
     n_high = sum(a.severity == "alta" for a in alerts)
+    if status == "favorable" and n_high:
+        # Un VAN positivo no alcanza si hay supuestos que pueden cambiar la conclusión.
+        status, head = "reservas", "Indicadores favorables con reservas bajo los supuestos cargados"
     det = f"{len(alerts)} alerta(s) activa(s), {n_high} de severidad alta." if alerts else "Sin alertas activas."
     return Reading(status, head, det)
 
@@ -861,12 +979,21 @@ class Evaluation:
     def row(self, name: str = "") -> dict:
         """Fila resumida para comparar escenarios (ver compare_scenarios)."""
         return dict(name=name or self.project.name, n_years=self.project.n_years, wacc=self.metrics.wacc,
-                    van=self.metrics.van_main, eaa=self.metrics.eaa)
+                    van=self.metrics.van_main, eaa=self.metrics.eaa, currency=self.wacc.flow_currency)
 
 
 def evaluate(p: Project, w, mc: Optional[MCSpec] = None, pess_mult: Optional[dict] = None) -> Evaluation:
     """Evaluación corregida. `w` puede ser WaccInputs o un WaccBreakdown ya armado."""
     wb = w if isinstance(w, WaccBreakdown) else wacc_breakdown(w)
+    if not math.isfinite(wb.wacc) or wb.wacc <= 0:
+        raise ValueError(f"El WACC resultante ({wb.wacc * 100:.2f} %) no es positivo: con una tasa de descuento ≤ 0 el VAN "
+                         "no tiene sentido. Revisar Rf, β, primas, Kd e inflaciones.")
+    if p.capex0 <= 0:
+        raise ValueError("El CAPEX inicial debe ser mayor que cero.")
+    if p.fcf_direct is not None and len(p.fcf_direct) != int(p.n_years):
+        raise ValueError(f"El flujo directo tiene {len(p.fcf_direct)} valores y el horizonte es de {int(p.n_years)} años.")
+    if mc is not None:
+        mc.validate()
     fl = project_flows(p)
     val = valuate(fl, wb.wacc, p)
     met = _metrics(fl, val, wb.wacc, p)

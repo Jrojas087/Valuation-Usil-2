@@ -469,6 +469,354 @@ class TestGlosario(unittest.TestCase):
         self.assertIn("&lt;", gl.celda_html("p_neg"))
         self.assertIn("**Fórmula:**", gl.ayuda("wacc"))
 
+# ═════════════════════════════════════════════════════════════════════════════
+# v3.1 — regresiones del testeo adversarial (A1–A10)
+class TestAdversarial(unittest.TestCase):
+    W = ve.WaccInputs(rf=.045, erp=.055, crp=.02, beta_u=.9, tax=.10, debt=400, equity=600, kd=.11,
+                      infl_flow=.035, infl_usd=.025, flow_currency="PYG")
+
+    def _spec(self, **ranges):
+        r = dict(ve.MCSpec().ranges)
+        r.update(ranges)
+        return ve.MCSpec(sims=2000, seed=1, ranges=r)
+
+    def test_A1_rangos_mc_invalidos_se_rechazan(self):
+        for bad in ((1.08, 1.0, 0.92),      # mín > máx: antes anulaba la variación en silencio
+                    (1.05, 1.0, 1.08),      # mín y máx positivos: antes sorteaba por debajo del mínimo
+                    (0.92, 1.0, 0.95),      # mín y máx negativos
+                    (-0.5, 1.0, 1.08)):     # multiplicador negativo
+            with self.assertRaises(ValueError, msg=bad):
+                ve.evaluate(proj_demo(), self.W, self._spec(price=bad))
+        with self.assertRaises(ValueError):
+            ve.evaluate(proj_demo(), self.W, ve.MCSpec(sims=2000, wacc_range=-0.05))
+
+    def test_A1_sorteos_respetan_el_rango_declarado(self):
+        for dist in ("triangular", "normal"):
+            d = ve._draw(replace(self._spec(price=(0.80, 1.0, 1.30)), dist=dist))["price"]
+            self.assertTrue(np.isfinite(d).all())
+            self.assertGreaterEqual(d.min(), 0.80 - 1e-12)
+            self.assertLessEqual(d.max(), 1.30 + 1e-12)
+            self.assertGreater(d.std(), 0.01)
+
+    def test_A1_driver_fijo_sigue_permitido(self):
+        ev = ve.evaluate(proj_demo(), self.W, self._spec(price=(1.0, 1.0, 1.0)))
+        self.assertEqual(ev.mc.stats["n"], 2000)
+
+    def test_A2_wacc_no_positivo_se_rechaza(self):
+        for w in (replace(self.W, rf=-2.0), replace(self.W, beta_u=-3.0), replace(self.W, kd=-0.5, debt=900, equity=100, rf=-0.1)):
+            with self.assertRaises(ValueError, msg=w):
+                ve.evaluate(proj_demo(), w)
+
+    def test_A2_entradas_de_tasa_imposibles(self):
+        for w in (replace(self.W, infl_usd=-1.0), replace(self.W, tax=1.5), replace(self.W, tax=-0.1),
+                  replace(self.W, debt=-1.0), replace(self.W, debt=0.0, equity=0.0)):
+            with self.assertRaises(ValueError, msg=w):
+                ve.wacc_breakdown(w)
+
+    def test_A3_favorable_con_alerta_alta_pasa_a_reservas(self):
+        ev = ve.evaluate(proj_demo(), replace(self.W, convert=False))          # V07 (alta)
+        self.assertGreater(ev.metrics.van_main, 0)
+        self.assertIn("V07", codes(ev))
+        self.assertEqual(ev.reading.status, "reservas")
+        self.assertIn("con reservas", ev.reading.headline)
+        limpio = ve.evaluate(ve.Project(n_years=5, capex0=500, fcf_direct=[180] * 5), ve.wacc_from_reported(0.10))
+        self.assertFalse(any(a.severity == "alta" for a in limpio.alerts))
+        self.assertEqual(limpio.reading.status, "favorable")
+
+    def test_A4_comparador_alerta_monedas_distintas(self):
+        rows = [dict(name="a", n_years=5, wacc=.13, wacc_key=1, currency="PYG"),
+                dict(name="b", n_years=5, wacc=.11, wacc_key=2, currency="USD")]
+        self.assertIn("V19", {a.code for a in ve.compare_scenarios(rows)})
+        rows[1]["currency"] = "PYG"
+        self.assertNotIn("V19", {a.code for a in ve.compare_scenarios(rows)})
+
+    def test_A5_reposicion_no_depende_de_la_vida_contable(self):
+        caja = [ve.project_flows(proj_demo(dep_years=L, maint_capex_of_capex=0.10, tax=0.0)).capex_repl[0].sum()
+                for L in (3, 8, 20)]
+        self.assertAlmostEqual(caja[0], caja[1], places=9)
+        self.assertAlmostEqual(caja[1], caja[2], places=9)
+        self.assertAlmostEqual(caja[0], 0.10 * 500 * 5, places=9)
+        # con IRE = 0 la vida contable no puede mover el VAN (antes lo movía a través de la reposición)
+        vans = [ve.evaluate(proj_demo(dep_years=L, maint_capex_of_capex=0.10, tax=0.0), replace(self.W, tax=0.0)).metrics.van_main
+                for L in (3, 8, 20)]
+        self.assertAlmostEqual(vans[0], vans[2], places=6)
+
+    def test_A5_sin_reposicion_el_ultimo_anio_si_el_proyecto_termina(self):
+        p = proj_demo(maint_capex_of_capex=0.10, repl_final_year=False)
+        fl = ve.project_flows(p)
+        self.assertEqual(fl.capex_repl[0, -1], 0.0)
+        self.assertGreater(fl.capex_repl[0, -2], 0.0)
+        perp = ve.project_flows(replace(p, terminal_mode="perpetuity", vt_justified=True))
+        self.assertGreater(perp.capex_repl[0, -1], 0.0)                         # el negocio continúa: se repone
+        self.assertAlmostEqual(fl.repl_steady[0], perp.capex_repl[0, -1], places=9)
+        self.assertTrue(ve.project_flows(proj_demo()).capex_repl[0, -1] > 0)    # comportamiento previo por defecto
+
+    def test_A6_desecho_con_perdida_genera_escudo_fiscal(self):
+        p = proj_demo(terminal_mode="salvage", salvage_value=100.0, maint_capex_pct=0.0)
+        fl = ve.project_flows(p)
+        libro = fl.book_end[0]
+        self.assertGreater(libro, 100.0)
+        self.assertAlmostEqual(fl.salvage_net[0], 100.0 + 0.10 * (libro - 100.0), places=9)
+
+    def test_A7_arrastre_de_perdidas(self):
+        base = dict(n_years=5, capex0=500, revenue_y1=1000, var_cost_y1=500, fixed_cost_y1=250, g_revenue=0.0, g_fixed=0.0,
+                    tax=.10, dep_years=10, maint_capex_pct=0.0, ramp_years=2, ramp_start=0.2)
+        sin = ve.project_flows(ve.Project(**base))
+        con = ve.project_flows(ve.Project(**base, loss_carryforward=True, loss_cf_cap=1.0))
+        tope = ve.project_flows(ve.Project(**base, loss_carryforward=True, loss_cf_cap=0.20))
+        self.assertLess(sin.ebit[0, 0], 0)
+        perdida = -np.minimum(sin.ebit[0], 0).sum()
+        self.assertAlmostEqual(con.loss_used[0].sum(), perdida, places=9)       # se usa toda, nunca más que la generada
+        self.assertAlmostEqual(sin.tax[0].sum() - con.tax[0].sum(), 0.10 * perdida, places=9)
+        for t in range(5):                                                      # tope del 20 % de la renta neta
+            self.assertLessEqual(tope.loss_used[0, t], 0.20 * max(tope.ebit[0, t], 0.0) + 1e-9)
+        self.assertTrue((con.tax[0] >= -1e-12).all())
+        self.assertLess(tope.tax[0].sum(), sin.tax[0].sum())
+
+    def test_A7_las_perdidas_vencen(self):
+        p = ve.Project(n_years=5, capex0=500, revenue_y1=1000, var_cost_y1=500, fixed_cost_y1=250, g_revenue=0.0, g_fixed=0.0,
+                       tax=.10, dep_years=10, maint_capex_pct=0.0, ramp_years=4, ramp_start=0.1,
+                       loss_carryforward=True, loss_cf_cap=1.0, loss_cf_years=1)
+        fl = ve.project_flows(p)
+        primer_positivo = int(np.argmax(fl.ebit[0] > 0))
+        self.assertGreater(primer_positivo, 1)
+        self.assertLessEqual(fl.loss_used[0, primer_positivo], -min(fl.ebit[0, primer_positivo - 1], 0.0) + 1e-9)
+
+    def test_A8_payback_ultimo_cruce(self):
+        self.assertIsNone(ve.payback_period(100, [150, -200, 10, 10]))        # el acumulado termina negativo
+        self.assertAlmostEqual(ve.payback_period(100, [150, -100, 100]), 2.5, places=9)       # el primer cruce no cuenta
+        self.assertIsNone(ve.payback_period(100, [10, 10, 10]))
+        for flows in ([40, 40, 40, 40], [100, 0, 0], [30, 80]):                               # convencional: igual que antes
+            self.assertAlmostEqual(ve.payback_period(100, flows), ve.legacy_payback(100, flows), places=12)
+            self.assertAlmostEqual(ve.payback_period(100, flows, 0.1) or -1, ve.legacy_payback(100, flows, 0.1) or -1, places=12)
+
+    def test_A9_apalancamiento_extremo(self):
+        ev = ve.evaluate(proj_demo(), replace(self.W, debt=950, equity=50))
+        self.assertIn("V18", codes(ev))
+        self.assertNotIn("V18", codes(ve.evaluate(proj_demo(), self.W)))
+
+    def test_A10_ventas_cero_con_costos_variables(self):
+        with self.assertRaises(ValueError):
+            ve.project_flows(proj_demo(revenue_y1=0.0))
+        ve.project_flows(proj_demo(revenue_y1=0.0, var_cost_y1=0.0))             # sin costos proporcionales: válido
+
+    def test_A_entradas_de_proyecto_incoherentes(self):
+        w = ve.wacc_from_reported(0.10)
+        with self.assertRaises(ValueError):
+            ve.evaluate(ve.Project(n_years=5, capex0=100, fcf_direct=[50, 50, 50]), w)
+        with self.assertRaises(ValueError):
+            ve.evaluate(ve.Project(n_years=3, capex0=0.0, fcf_direct=[50, 50, 50]), w)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# v3.1 — proyectos aleatorios contra un modelo independiente (Python puro, sin numpy ni código del motor)
+def _rand_case(i, rnd):
+    cur = rnd.choice(["PYG", "PYG", "USD"])
+    capex = round(rnd.uniform(0.5e9, 20e9)) if cur == "PYG" else round(rnd.uniform(1e5, 3e6), 2)
+    r2 = (lambda x: round(x)) if cur == "PYG" else (lambda x: round(x, 2))
+    sales = r2(capex * rnd.uniform(0.5, 2.2))
+    cvar = r2(sales * rnd.uniform(0.30, 0.65))
+    cfix = r2(sales * rnd.uniform(0.10, 0.28))
+    dv = rnd.choice([0.0, rnd.uniform(0.1, 0.7)])
+    mode = rnd.choice(["none", "none", "salvage", "perpetuity"])
+    ramp_years = rnd.choice([0, 0, 1, 2, 3])
+    return dict(
+        id=i, cur=cur, capex=capex, sales=sales, cvar=cvar, cfix=cfix,
+        ar=r2(sales * rnd.uniform(0.02, 0.12)), inv=r2(sales * rnd.uniform(0.0, 0.08)), ap=r2(sales * rnd.uniform(0.0, 0.08)),
+        n=rnd.randint(3, 10), g=round(rnd.uniform(0.0, 9.0), 2), gfix=round(rnd.uniform(2.0, 6.0), 2),
+        dep_years=rnd.randint(3, 15), repl=round(rnd.uniform(0.0, 15.0), 1),
+        ramp_years=ramp_years, ramp_start=rnd.choice([30, 40, 50, 60, 70, 80]) if ramp_years else 100,
+        mode=mode, salvage=r2(capex * rnd.uniform(0.0, 0.5)) if mode == "salvage" else 0.0, ginf=round(rnd.uniform(1.0, 4.0), 1),
+        rf=round(rnd.uniform(3.5, 5.0), 2), erp=round(rnd.uniform(4.0, 6.5), 2), crp=round(rnd.uniform(1.5, 3.5), 2),
+        size=rnd.choice([0.0, 0.0, round(rnd.uniform(1.0, 3.0), 1)]), beta=round(rnd.uniform(0.6, 1.5), 2), tax=10.0,
+        debt=r2(capex * dv), equity=r2(capex * (1 - dv)),
+        kd=round(rnd.uniform(8.0, 14.0), 2) if cur == "PYG" else round(rnd.uniform(5.0, 9.0), 2),
+        pi_usd=round(rnd.uniform(2.0, 3.0), 1), pi_flow=round(rnd.uniform(3.0, 4.5), 1))
+
+
+def _rand_to_engine(c):
+    pi_flow = c["pi_flow"] / 100 if c["cur"] == "PYG" else c["pi_usd"] / 100
+    w = ve.WaccInputs(rf=c["rf"] / 100, erp=c["erp"] / 100, crp=c["crp"] / 100, beta_u=c["beta"], tax=c["tax"] / 100,
+                      debt=float(c["debt"]), equity=float(c["equity"]), kd=c["kd"] / 100, size_premium=c["size"] / 100,
+                      infl_flow=pi_flow, infl_usd=c["pi_usd"] / 100, flow_currency=c["cur"], convert=True)
+    p = ve.Project(n_years=c["n"], capex0=float(c["capex"]), revenue_y1=float(c["sales"]), var_cost_y1=float(c["cvar"]),
+                   fixed_cost_y1=float(c["cfix"]), g_revenue=c["g"] / 100, g_fixed=c["gfix"] / 100, tax=c["tax"] / 100,
+                   dep_years=c["dep_years"], maint_capex_of_capex=c["repl"] / 100, repl_final_year=False, loss_carryforward=True,
+                   infl_capex=pi_flow, nwc_y1=float(c["ar"] + c["inv"] - c["ap"]), recover_nwc=True,
+                   salvage_value=float(c["salvage"]), ramp_years=c["ramp_years"], ramp_start=c["ramp_start"] / 100,
+                   terminal_mode=c["mode"], g_inf=c["ginf"] / 100, vt_justified=c["mode"] == "perpetuity", name=f"R{c['id']}")
+    return p, w
+
+
+def _rand_indep(c, m=None):
+    """m = multiplicadores opcionales {price, volume, unit_vc, fixed, capex, dw}."""
+    m = dict(dict(price=1.0, volume=1.0, unit_vc=1.0, fixed=1.0, capex=1.0, dw=0.0), **(m or {}))
+    T = c["tax"] / 100
+    pi_u = c["pi_usd"] / 100
+    pi_f = c["pi_flow"] / 100 if c["cur"] == "PYG" else pi_u
+    D, E = float(c["debt"]), float(c["equity"])
+    bl = c["beta"] * (1 + (1 - T) * D / E)
+    ke_usd = c["rf"] / 100 + bl * c["erp"] / 100 + c["crp"] / 100 + c["size"] / 100
+    ke = (1 + ke_usd) * (1 + pi_f) / (1 + pi_u) - 1
+    wacc0 = E / (D + E) * ke + D / (D + E) * c["kd"] / 100 * (1 - T)
+    w = wacc0 + m["dw"]
+    N, L = c["n"], c["dep_years"]
+    capex = c["capex"] * m["capex"]
+    g, gf = c["g"] / 100, c["gfix"] / 100
+    k, s0 = c["ramp_years"], c["ramp_start"] / 100
+    nwc_y1 = c["ar"] + c["inv"] - c["ap"]
+    rev, ebitda, repl, repl_plan, nwc = [], [], [], [], []
+    for t in range(1, N + 1):
+        ramp = 1.0 if k == 0 else min(1.0, s0 + (1 - s0) * (t - 1) / k)
+        base_rev = c["sales"] * (1 + g) ** (t - 1) * ramp
+        r = base_rev * m["price"] * m["volume"]
+        vc = c["cvar"] / c["sales"] * base_rev * m["volume"] * m["unit_vc"]
+        fx = c["cfix"] * (1 + gf) ** (t - 1) * m["fixed"]
+        rev.append(r)
+        ebitda.append(r - vc - fx)
+        rp = c["repl"] / 100 * capex * (1 + pi_f) ** (t - 1)
+        repl_plan.append(rp)
+        repl.append(0.0 if (t == N and c["mode"] != "perpetuity") else rp)
+        nwc.append(nwc_y1 / c["sales"] * r)
+    dep = []
+    for t in range(1, N + 1):
+        d = capex / L if t <= L else 0.0
+        for s in range(1, t):                       # reposicion del anio s se deprecia en s+1 .. s+L
+            if t <= s + L:
+                d += repl[s - 1] / L
+        dep.append(d)
+    ebit = [a - b for a, b in zip(ebitda, dep)]
+    losses = [max(-e, 0.0) for e in ebit]
+    tax, used_all = [], []
+    for t in range(N):
+        room = 0.20 * max(ebit[t], 0.0)
+        used = 0.0
+        for o in range(max(0, t - 5), t):
+            u = min(losses[o], room)
+            losses[o] -= u
+            room -= u
+            used += u
+        used_all.append(used)
+        tax.append(T * max(ebit[t] - used, 0.0))
+    fcf = []
+    for t in range(N):
+        dn = nwc[t] - (nwc[t - 1] if t else 0.0)
+        fcf.append(ebitda[t] - tax[t] - dn - repl[t])
+    book = capex + sum(repl) - sum(dep)
+    pv = lambda x, t: x / (1 + w) ** t
+    pv_ops = sum(pv(f, t + 1) for t, f in enumerate(fcf))
+    van_sin = pv_ops + pv(nwc[-1], N) - capex
+    cfs_sin = [-capex] + fcf[:]
+    cfs_sin[-1] += nwc[-1]
+    if c["mode"] == "salvage":
+        salv = c["salvage"] - T * (c["salvage"] - book)
+        van = van_sin + pv(salv, N)
+    elif c["mode"] == "perpetuity":
+        ge = min(c["ginf"] / 100, w - 0.02)
+        eb = ebitda[-1] * (1 + ge)
+        cn = max(repl_plan[-1], dep[-1]) * (1 + ge)
+        nf = eb - T * max(eb - cn, 0.0) - cn - nwc[-1] * ge
+        van = pv_ops + pv(nf / (w - ge), N) - capex
+    else:
+        van = van_sin
+
+    def npv_at(r, cfs):
+        return sum(x / (1 + r) ** i for i, x in enumerate(cfs))
+
+    irr = None
+    if any(x > 0 for x in cfs_sin) and any(x < 0 for x in cfs_sin):
+        lo, hi = -0.99, 50.0
+        if npv_at(lo, cfs_sin) * npv_at(hi, cfs_sin) < 0:
+            for _ in range(300):
+                mid = (lo + hi) / 2
+                if npv_at(lo, cfs_sin) * npv_at(mid, cfs_sin) <= 0:
+                    hi = mid
+                else:
+                    lo = mid
+            irr = (lo + hi) / 2
+    cum, pb, prev = -capex, None, -capex
+    for i, f in enumerate(cfs_sin[1:], 1):
+        prev, cum = cum, cum + f
+        if prev < 0 <= cum:
+            pb = i - 1 + (-prev) / f
+        elif cum < 0:
+            pb = None
+    eaa = van * w / (1 - (1 + w) ** -N)
+    return dict(wacc=wacc0, ke=ke, beta_l=bl, van=van, van_sin=van_sin, irr=irr, payback=pb, eaa=eaa, fcf=fcf, ebit=ebit,
+                tax=tax, dep=dep, used=used_all, book=book, ebitda=ebitda, rev=rev, ir=1 + van_sin / capex)
+
+
+class TestAleatorios(unittest.TestCase):
+    """El motor debe coincidir con una segunda implementación escrita aparte, año por año y fórmula por fórmula."""
+
+    def setUp(self):
+        import random
+        rnd = random.Random(2026)
+        self.cases = [_rand_case(i + 1, rnd) for i in range(10)]
+
+    def test_motor_coincide_con_modelo_independiente(self):
+        for c in self.cases:
+            p, w = _rand_to_engine(c)
+            ev = ve.evaluate(p, w)
+            m, I = ev.metrics, _rand_indep(c)
+            for nombre, a, b in (("wacc", m.wacc, I["wacc"]), ("van", m.van_main, I["van"]), ("van_sin_vt", m.van_sin_vt, I["van_sin"]),
+                                 ("eaa", m.eaa, I["eaa"]), ("ir", m.ir_sin_vt, I["ir"])):
+                self.assertLess(abs(a - b), 1e-9 * max(abs(b), 1.0), (c["id"], nombre))
+            for a, b in zip(ev.flows.fcf_ops[0], I["fcf"]):
+                self.assertLess(abs(a - b), 1e-9 * max(abs(b), 1.0), (c["id"], "fcf"))
+            self.assertEqual(m.irr_sin_vt is None, I["irr"] is None, c["id"])
+            if I["irr"] is not None:
+                self.assertAlmostEqual(m.irr_sin_vt, I["irr"], places=9, msg=c["id"])
+            self.assertEqual(m.payback is None, I["payback"] is None, c["id"])
+            if I["payback"] is not None:
+                self.assertAlmostEqual(m.payback, I["payback"], places=9, msg=c["id"])
+
+    def test_punto_de_equilibrio_anula_el_van_del_modelo_independiente(self):
+        for c in self.cases:
+            p, w = _rand_to_engine(c)
+            ev = ve.evaluate(p, w)
+            for b in ev.breakevens:
+                if b.rel_change is None:
+                    continue
+                mult = dict(dw=b.limit_value - ev.metrics.wacc) if b.driver == "wacc" else {b.driver: 1 + b.rel_change}
+                self.assertLess(abs(_rand_indep(c, mult)["van"]) / c["capex"], 1e-4, (c["id"], b.driver))
+
+    def test_pesimista_cuartil_queda_dentro_de_la_simulacion(self):
+        """El escenario pesimista de la app (cuartil adverso) debe ser un caso plausible: entre el 2 % y el 15 % peor."""
+        for c in self.cases:
+            p, w = _rand_to_engine(c)
+            ev = ve.evaluate(p, w, ve.MCSpec(sims=8000, seed=3, pess_quantile=0.25))
+            pct = float((ev.mc.npv_main < ev.pess_van_main).mean())
+            self.assertTrue(0.02 < pct < 0.15, (c["id"], pct))
+            extremo = ve.evaluate(p, w, ve.MCSpec(sims=8000, seed=3, pess_quantile=0.0))
+            self.assertLessEqual(extremo.pess_van_main, ev.mc.npv_main.min())      # los extremos caen fuera de la simulación
+
+
+class TestCalibracion(unittest.TestCase):
+    def test_peso_del_vt_acotado(self):
+        p = proj_demo(fixed_cost_y1=480.0)                     # flujos del horizonte negativos, VT de referencia positivo o nulo
+        ev = ve.evaluate(p, ve.wacc_from_reported(0.10))
+        w = ev.metrics.vt_weight
+        self.assertTrue(w != w or 0.0 <= w <= 1.0, w)
+        for kw in (dict(), dict(terminal_mode="perpetuity", vt_justified=True), dict(terminal_mode="salvage", salvage_value=300.0)):
+            w = ve.evaluate(proj_demo(**kw), ve.wacc_from_reported(0.10)).metrics.vt_weight
+            self.assertTrue(0.0 <= w <= 1.0, (kw, w))
+
+    def test_V20_horizonte_mayor_que_la_vida_de_los_activos(self):
+        w = ve.wacc_from_reported(0.10)
+        corto = proj_demo(n_years=9, dep_years=5, maint_capex_of_capex=0.05)        # repone 5 % y desgasta 20 % por año
+        self.assertIn("V20", codes(ve.evaluate(corto, w)))
+        self.assertNotIn("V20", codes(ve.evaluate(replace(corto, maint_capex_of_capex=0.20), w)))
+        self.assertNotIn("V20", codes(ve.evaluate(replace(corto, n_years=5), w)))
+        self.assertNotIn("V20", codes(ve.evaluate(replace(corto, terminal_mode="perpetuity", vt_justified=True), w)))
+
+    def test_V11_explica_el_escenario_segun_como_se_armo(self):
+        spec = ve.MCSpec(sims=2000, seed=1, pess_quantile=0.25)
+        ev = ve.evaluate(proj_demo(fixed_cost_y1=330.0), ve.wacc_from_reported(0.10), spec)
+        self.assertLess(ev.pess_van_main, 0)
+        v11 = [a for a in ev.alerts if a.code == "V11"][0]
+        self.assertIn("25 % más adverso", v11.detail)
+        self.assertIn("25 % más adverso", rep.pess_label(ev))
+
 
 if __name__ == "__main__":
     unittest.main()

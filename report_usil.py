@@ -29,7 +29,7 @@ DISCLOSURE = [
     "Los resultados son estimaciones que dependen de los supuestos cargados; no son una recomendación de inversión ni una garantía.",
     "Hechos: los indicadores (VAN, TIR, WACC) son cálculos. Opiniones: la lectura y las alertas son juicios del modelo según umbrales fijos.",
     "Flujos al proyecto (FCFF) descontados al WACC con estructura de capital objetivo; costos hundidos y financieros excluidos del flujo.",
-    "No valora opciones reales (expansión, abandono); el IRE no arrastra pérdidas; el riesgo país entra como prima en el Ke.",
+    "No valora opciones reales (expansión, abandono); el arrastre de pérdidas fiscales, cuando está activo, usa 5 años y un tope del 20 % de la renta neta (verificar la norma vigente); el riesgo país entra como prima en el Ke.",
     "El Monte Carlo refleja solo las distribuciones y correlaciones elegidas por el usuario.",
 ]
 
@@ -70,6 +70,14 @@ def _fmt_cur_short(x: Optional[float], currency: str) -> str:
 
 def wrap(s: str, width: int) -> list[str]:
     return textwrap.wrap(s, width=width, break_long_words=False, replace_whitespace=False)
+
+
+def pess_label(ev) -> str:
+    """Cómo se armó el escenario pesimista (extremos del rango o cuantil adverso de cada variable)."""
+    q = float(ev.mc.spec.pess_quantile) if ev.mc is not None else 0.0
+    if q > 0:
+        return f"cada variable en su {q * 100:.0f} % más adverso, todas a la vez"
+    return "extremos adversos de todos los drivers a la vez"
 
 
 def describe_break(be: Optional[ve.BreakEven], cur: str) -> str:
@@ -184,7 +192,7 @@ def build_onepager_text(r: OnePager) -> str:
     for i, f in enumerate(ev.flows.fcf_ops[0], 1):
         L.append(f"- Año {i}: {fc(f)}")
     L += [f"- VT (año {p.n_years}): {fc(m.vt) if p.effective_mode() == 'perpetuity' or m.con_vt_is_reference else '—'}", ""]
-    L.append("ESCENARIO PESIMISTA DETERMINÍSTICO (extremos adversos de todos los drivers a la vez)")
+    L.append(f"ESCENARIO PESIMISTA DETERMINÍSTICO ({pess_label(ev)})")
     if ev.pess_mult:
         pm = ev.pess_mult
         L.append("- Precio ×{price:.2f} | volumen ×{volume:.2f} | costo variable ×{unit_vc:.2f} | costos fijos ×{fixed:.2f} | CAPEX ×{capex:.2f} | WACC +{wacc_pp:.2f} pp".format(
@@ -284,7 +292,7 @@ def generate_onepager_pdf(r: OnePager, hist_counts=None, hist_edges=None) -> byt
     cv.setFillColor(bg); cv.rect(0, 0, W, H, stroke=0, fill=1)
     mg = int(0.375 * inch); top = H - mg; left = mg; right = W - mg; cw = right - left; GAP = 6
 
-    status_col = {"favorable": good, "mixto": warn_c, "desfavorable": bad}.get(ev.reading.status, accent)
+    status_col = {"favorable": good, "reservas": warn_c, "mixto": warn_c, "desfavorable": bad}.get(ev.reading.status, accent)
 
     # ═ 1. HEADER ═
     h1 = 78

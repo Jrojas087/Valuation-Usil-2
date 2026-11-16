@@ -67,12 +67,10 @@ class TestApp(unittest.TestCase):
         self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
         self.assertTrue(any("con perpetuidad" in m.label for m in at.metric))
 
-    def test_desecho_rampa_normal_y_correlaciones(self):
+    def test_desecho_y_rampa(self):
         at = new_app()
         find(at.sidebar.selectbox, "Tratamiento").set_value("Valor de desecho").run()
         find(at.sidebar.number_input, "Años de rampa").set_value(2).run()
-        find(at.sidebar.selectbox, "Distribución").set_value("Normal truncada").run()
-        find(at.sidebar.slider, "Correlación precio").set_value(-0.5).run()
         self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
 
     def test_ke_sin_convertir_dispara_v07(self):
@@ -159,6 +157,81 @@ class TestExplicacionAcademica(unittest.TestCase):
             h = find(at.sidebar.number_input, lab).help
             self.assertIn("Base teórica", h, lab)
             self.assertIn("Fórmula", h, lab)
+
+class TestAdversarialUI(unittest.TestCase):
+    def test_limites_en_los_campos_de_tasa(self):
+        at = new_app()
+        esperado = {"Rf (%)": (-2.0, 30.0), "ERP (%)": (0.0, 30.0), "βU": (0.0, 5.0), "IRE (%)": (0.0, 60.0),
+                    "π USD": (-5.0, 50.0), "Kd (%)": (0.0, 100.0)}
+        for lab, (lo, hi) in esperado.items():
+            w = find(at.sidebar.number_input, lab)
+            self.assertEqual((w.min, w.max), (lo, hi), lab)
+
+    def test_error_legible_si_el_wacc_no_es_positivo(self):
+        at = new_app()
+        find(at.sidebar.number_input, "Rf (%)").set_value(-2.0)
+        find(at.sidebar.number_input, "ERP (%)").set_value(0.0)
+        find(at.sidebar.number_input, "CRP (%)").set_value(0.0)
+        find(at.sidebar.number_input, "Kd (%)").set_value(0.0)
+        find(at.sidebar.number_input, "π Gs").set_value(-5.0).run()
+        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        self.assertTrue(any("No se pudo evaluar" in e.value for e in at.error))
+
+    def test_lectura_favorable_por_defecto_y_con_reservas_si_hay_alerta_alta(self):
+        at = new_app()
+        t = texts(at)
+        self.assertIn("Indicadores favorables bajo los supuestos cargados", t)
+        self.assertNotIn("con reservas", t)
+        find(at.sidebar.checkbox, "Convertir Ke").set_value(False).run()      # V07: alerta de severidad alta
+        self.assertIn("con reservas", texts(at))
+
+    def test_variable_critica_cambia_de_lectura_con_van_negativo(self):
+        at = new_app()
+        self.assertIn("el supuesto que más conviene validar", texts(at))
+        find(at.sidebar.number_input, "Costos fijos").set_value(4_300_000_000.0).run()
+        t = texts(at)
+        self.assertIn("El VAN es negativo", t)
+        self.assertNotIn("el supuesto que más conviene validar", t)
+
+    def test_nombre_de_proyecto_se_escapa(self):
+        at = new_app()
+        find(at.sidebar.text_input, "Proyecto").set_value("<img src=x onerror=alert(1)>").run()
+        self.assertEqual(len(at.exception), 0)
+        self.assertFalse(any("<img src=x" in str(m.value) for m in at.markdown))
+        self.assertTrue(any("&lt;img src=x" in str(m.value) for m in at.markdown))
+
+    def test_escenarios_guardan_su_moneda(self):
+        at = new_app()
+        find(at.button, "Guardar").click().run()
+        find(at.sidebar.selectbox, "💱").set_value("USD 🇺🇸  Dólar Estadounidense").run()
+        find(at.button, "Guardar").click().run()
+        self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+        df = at.dataframe[-1].value
+        self.assertEqual(list(df["Moneda"]), ["PYG", "USD"])
+        self.assertTrue(df["VAN"][0].startswith("Gs."))
+        self.assertTrue(df["VAN"][1].startswith("$"))
+        self.assertIn("V19", texts(at))
+
+    def test_reposicion_tiene_ayuda(self):
+        at = new_app()
+        self.assertIn("vida contable", find(at.sidebar.number_input, "Reposición anual (% del CAPEX").help)
+
+    def test_monte_carlo_sin_controles_y_con_resultado(self):
+        """Decisión didáctica: la simulación no se configura; se muestra el resultado y sus supuestos fijos."""
+        for modo in (False, True):
+            at = new_app()
+            if modo:
+                find(at.sidebar.toggle, "Modo compatibilidad").set_value(True).run()
+            self.assertEqual(len(at.exception), 0, [e.value for e in at.exception])
+            etiquetas = [str(w.label) for coll in (at.sidebar.number_input, at.sidebar.slider, at.sidebar.selectbox,
+                                                   at.sidebar.checkbox) for w in coll]
+            for prohibido in ("Simulaciones", "Distribución", "Semilla", "mín (%)", "máx (%)", "WACC ±", "Correlación",
+                              "Escenario pesimista", "Arrastrar", "g base"):
+                self.assertFalse(any(prohibido in e for e in etiquetas), (modo, prohibido))
+            self.assertTrue(any(m.label.startswith("P(VAN<0)") for m in at.metric))
+        t = texts(new_app())
+        self.assertIn("Supuestos fijos de la simulación", t)
+        self.assertIn("15.000 escenarios", t)
 
 
 if __name__ == "__main__":

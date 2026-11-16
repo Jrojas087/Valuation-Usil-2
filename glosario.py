@@ -111,7 +111,7 @@ G: Dict[str, Dict[str, str]] = {
     "ire": dict(
         nombre="IRE (impuesto a la renta empresarial)",
         que="Impuesto sobre la utilidad operativa. En Paraguay la tasa general es 10 %.",
-        formula="IRE = T · máx(EBIT, 0)",
+        formula="IRE = T · máx(EBIT − pérdidas compensadas de años anteriores, 0)",
         lectura="Solo se paga cuando el EBIT es positivo. Este modelo no arrastra pérdidas fiscales de un año a otro.",
         base="Legislación tributaria vigente; verificá la tasa aplicable a tu caso.",
     ),
@@ -177,7 +177,7 @@ G: Dict[str, Dict[str, str]] = {
     ),
     "payback": dict(
         nombre="Payback simple",
-        que="Tiempo que tarda el flujo acumulado, sin descontar, en igualar la inversión inicial (con interpolación dentro del año).",
+        que="Tiempo que tarda el flujo acumulado, sin descontar, en igualar la inversión inicial y no volver a quedar por debajo (con interpolación dentro del año). Si el acumulado termina negativo, la inversión no se recupera (N/D).",
         formula="Payback = año anterior + (inversión pendiente / flujo del año de recupero)",
         lectura="Mide rapidez de recupero (liquidez y riesgo), no rentabilidad: ignora el valor del dinero en el tiempo y los flujos posteriores. Es secundario.",
         base="Presupuesto de capital: limitaciones del payback.",
@@ -227,9 +227,9 @@ G: Dict[str, Dict[str, str]] = {
     ),
     "van_pess": dict(
         nombre="VAN del escenario pesimista",
-        que="VAN con todos los drivers (precio, volumen, costos, CAPEX, WACC) en su lado adverso a la vez.",
+        que="VAN con todas las variables (precio, volumen, costos, CAPEX, WACC) en su lado adverso a la vez: cada una en el 25 % más desfavorable de su rango. Equivale aproximadamente al 7 % peor de la simulación.",
         formula="Mismo cálculo del VAN con los valores adversos de cada driver",
-        lectura="Si es negativo, el proyecto no resiste una combinación adversa aunque la simulación muestre baja probabilidad de pérdida.",
+        lectura="Si es negativo, el proyecto no resiste un deterioro moderado y simultáneo de sus supuestos. Es un caso concreto y explicable, a diferencia de un percentil de la simulación.",
         base="Análisis de escenarios.",
     ),
     "base_pct": dict(
@@ -285,7 +285,7 @@ G: Dict[str, Dict[str, str]] = {
     "ire_row": dict(
         nombre="IRE del año",
         que="Impuesto a la renta empresarial que paga el proyecto sobre su utilidad operativa.",
-        formula="IRE = T · máx(EBIT, 0)",
+        formula="IRE = T · máx(EBIT − pérdidas compensadas de años anteriores, 0)",
         lectura="Se calcula sobre el EBIT, sin intereses: el beneficio fiscal de la deuda ya está en el Kd después de impuestos del WACC.",
         base="FCFF: flujos al proyecto antes de costos financieros.",
     ),
@@ -306,8 +306,8 @@ G: Dict[str, Dict[str, str]] = {
     "capex_repl": dict(
         nombre="CAPEX de reposición",
         que="Inversión anual necesaria para reponer los activos que se desgastan y mantener la capacidad productiva del negocio.",
-        formula="Reposición = % × depreciación de la base inicial, indexada por la inflación",
-        lectura="En perpetuidad debe ser al menos igual a la depreciación: ningún negocio dura para siempre sin reponer sus activos.",
+        formula="Reposición = % × CAPEX inicial, indexada por la inflación",
+        lectura="Es caja real y no depende de la vida contable. En perpetuidad debe ser al menos igual a la depreciación: ningún negocio dura para siempre sin reponer sus activos. Si el proyecto termina en el año N, ese último año no se repone.",
         base="Valor terminal con reinversión (FCF normalizado).",
     ),
     "fcf": dict(

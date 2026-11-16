@@ -55,15 +55,15 @@ Contraste de la calculadora con los principios habituales del currículo CFA. Es
 - **Humanitas** se evaluó con FCF₁ y g∞ **inferidos** de los outputs; no es una reproducción verificada. Que su WACC cambiara con el horizonte **no se puede explicar** con el código: el reporte v2.0 no guardaba los inputs.
 - El **Monte Carlo v2.0 no se reproduce** dentro de ±0,5 % (rangos y semilla desconocidos). Las cifras de P(VAN<0) corregidas de F1–F3 y F5 usan rangos **supuestos** y solo ven el nivel del FCF, no precio ni volumen; solo F4 corre el motor completo. El 73 % de F4 depende de esos rangos asumidos.
 - Las inflaciones (3,5 % / 2,5 %) y los pesos E/V–D/V de F1 y F2 son **supuestos o derivaciones**, rotulados en el informe.
-- El **escenario pesimista por defecto** (todos los drivers en su extremo a la vez) es severo: casi cualquier proyecto con margen ajustado mostrará la alerta V11. Se puede cambiar a «P10 adverso» en la barra lateral.
+- El **escenario pesimista por defecto** (todos los drivers en su extremo a la vez) es severo: casi cualquier proyecto con margen ajustado mostrará la alerta V11. Desde la v3.1 la simulación corre con supuestos fijos y no se configura en la app (decisión didáctica); el motor conserva la opción «P10 adverso».
 - Los umbrales de las alertas (p. ej. «inversión significativa» = CAPEX ≥ 25 % de las ventas; FCF/EBIT entre 0,30 y 1,50) son criterios de juicio, no normas.
-- El modelo **no** arrastra pérdidas fiscales (IRE solo sobre EBIT > 0), **no** valora opciones reales y **no** valida que los flujos sean realmente incrementales: eso depende de quien carga los datos.
+- El arrastre de pérdidas fiscales es **opcional** desde la v3.1 (5 años, tope 20 %: parámetros a verificar contra la norma vigente); el modelo **no** valora opciones reales y **no** valida que los flujos sean realmente incrementales: eso depende de quien carga los datos.
 - Los casos F3 (VAN negativo sin VT) y F4 (VAN casi nulo) cambian de conclusión **bajo los supuestos del informe**; no equivalen a una recomendación de rechazo.
 
 ## 5. Cómo verificar
 
 ```bash
-python -m unittest -v          # 56 pruebas del motor + 14 de la interfaz
+python -m unittest -v          # 78 pruebas del motor + 22 de la interfaz
 python backtest.py             # regenera INFORME_BACKTEST.md
 streamlit run app.py
 ```
